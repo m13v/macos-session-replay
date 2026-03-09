@@ -1,4 +1,3 @@
-import AppKit
 import CoreGraphics
 import Darwin
 import Foundation
@@ -218,14 +217,18 @@ public actor VideoChunkEncoder {
         let outputSize = calculateOutputSize(for: imageSize)
         currentOutputSize = outputSize
 
+        // Use raw BGRA pixel input instead of PNG to avoid expensive per-frame PNG encoding
+        let inputWidth = Int(outputSize.width)
+        let inputHeight = Int(outputSize.height)
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ffmpegPath)
         process.arguments = [
-            "-f", "image2pipe",
-            "-vcodec", "png",
+            "-f", "rawvideo",
+            "-pixel_format", "bgra",
+            "-video_size", "\(inputWidth)x\(inputHeight)",
             "-r", String(frameRate),
             "-i", "-",
-            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-vcodec", "hevc_videotoolbox",
             "-tag:v", "hvc1",
             "-q:v", "65",
@@ -258,16 +261,36 @@ public actor VideoChunkEncoder {
             throw ScreenRecordingError.encoderFailed("FFmpeg not ready")
         }
 
-        let pngData: Data = try autoreleasepool {
-            let scaledImage = scaleImage(image, to: outputSize)
-            guard let data = createPNGData(from: scaledImage) else {
-                throw ScreenRecordingError.encoderFailed("Failed to create PNG data")
+        let rawData: Data = try autoreleasepool {
+            let width = Int(outputSize.width)
+            let height = Int(outputSize.height)
+            let bytesPerRow = width * 4  // BGRA = 4 bytes per pixel
+            let totalBytes = bytesPerRow * height
+
+            guard let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+            ) else {
+                throw ScreenRecordingError.encoderFailed("Failed to create bitmap context")
             }
-            return data
+
+            context.interpolationQuality = .low
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+            guard let data = context.data else {
+                throw ScreenRecordingError.encoderFailed("Failed to get bitmap data")
+            }
+
+            return Data(bytes: data, count: totalBytes)
         }
 
         do {
-            try stdin.write(contentsOf: pngData)
+            try stdin.write(contentsOf: rawData)
         } catch {
             throw ScreenRecordingError.encoderFailed("Failed to write frame to ffmpeg: \(error.localizedDescription)")
         }
@@ -388,35 +411,6 @@ public actor VideoChunkEncoder {
         return CGSize(width: CGFloat(newWidth), height: CGFloat(newHeight))
     }
 
-    private func scaleImage(_ image: CGImage, to targetSize: CGSize) -> CGImage {
-        let currentSize = CGSize(width: image.width, height: image.height)
-
-        if currentSize.width == targetSize.width && currentSize.height == targetSize.height {
-            return image
-        }
-
-        guard let context = CGContext(
-            data: nil,
-            width: Int(targetSize.width),
-            height: Int(targetSize.height),
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            return image
-        }
-
-        context.interpolationQuality = .high
-        context.draw(image, in: CGRect(origin: .zero, size: targetSize))
-
-        return context.makeImage() ?? image
-    }
-
-    private func createPNGData(from image: CGImage) -> Data? {
-        let bitmapRep = NSBitmapImageRep(cgImage: image)
-        return bitmapRep.representation(using: .png, properties: [:])
-    }
 
     // MARK: - Cleanup
 
