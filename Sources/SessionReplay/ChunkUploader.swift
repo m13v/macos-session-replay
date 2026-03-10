@@ -123,6 +123,7 @@ public actor ChunkUploader {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(backendSecret)", forHTTPHeaderField: "Authorization")
+        request.setValue(deviceId, forHTTPHeaderField: "x-device-id")
 
         let body: [String: Any] = [
             "device_id": deviceId,
