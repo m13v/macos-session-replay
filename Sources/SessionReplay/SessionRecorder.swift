@@ -52,6 +52,7 @@ public actor SessionRecorder {
     private var chunkStartTime: Date?
 
     public private(set) var isRecording: Bool = false
+    public private(set) var isPaused: Bool = false
 
     // MARK: - Initialization
 
@@ -128,6 +129,23 @@ public actor SessionRecorder {
         log("SessionRecorder: Started session \(newSessionId) at \(config.framesPerSecond) FPS")
     }
 
+    /// Pause frame capture without stopping the session.
+    /// The capture loop keeps running but skips frames. If paused long enough,
+    /// the encoder's staleness timer will finalize the current chunk automatically.
+    /// Call `resume()` to continue capturing.
+    public func pause() {
+        guard isRecording, !isPaused else { return }
+        isPaused = true
+        log("SessionRecorder: Paused")
+    }
+
+    /// Resume frame capture after a pause.
+    public func resume() {
+        guard isRecording, isPaused else { return }
+        isPaused = false
+        log("SessionRecorder: Resumed")
+    }
+
     /// Stop recording
     public func stop() async {
         guard isRecording else { return }
@@ -147,7 +165,7 @@ public actor SessionRecorder {
     // MARK: - Capture Loop
 
     private func captureFrame() async {
-        guard isRecording else { return }
+        guard isRecording, !isPaused else { return }
 
         // Capture full display
         guard let cgImage = await captureService.captureFullDisplay() else {
@@ -196,9 +214,9 @@ public actor SessionRecorder {
     }
 
     /// Get current recording status
-    public func getStatus() async -> (isRecording: Bool, sessionId: String?, frameCount: Int, pendingUploads: Int) {
+    public func getStatus() async -> (isRecording: Bool, isPaused: Bool, sessionId: String?, frameCount: Int, pendingUploads: Int) {
         let pending = await uploader.pendingCount
-        return (isRecording, sessionId, frameNumber, pending)
+        return (isRecording, isPaused, sessionId, frameNumber, pending)
     }
 }
 
