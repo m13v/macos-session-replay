@@ -54,6 +54,20 @@ public actor SessionRecorder {
     public private(set) var isRecording: Bool = false
     public private(set) var isPaused: Bool = false
 
+    /// Called when a chunk is finalized and ready on disk, before upload.
+    /// The consumer can read the file at `localURL` for local analysis.
+    /// The chunk will be uploaded (and potentially deleted) after this callback returns.
+    public var onChunkReady: (@Sendable (ChunkInfo) async -> Void)?
+
+    /// Metadata about a finalized chunk.
+    public struct ChunkInfo: Sendable {
+        public let localURL: URL
+        public let sessionId: String
+        public let chunkIndex: Int
+        public let startTimestamp: Date
+        public let endTimestamp: Date
+    }
+
     // MARK: - Initialization
 
     public init(configuration: Configuration) {
@@ -198,6 +212,17 @@ public actor SessionRecorder {
         let chunkURL = await storage.chunkURL(sessionId: sessionId, relativePath: chunkPath)
         let now = Date()
 
+        // Notify consumer before upload (they can read the file on disk)
+        let info = ChunkInfo(
+            localURL: chunkURL,
+            sessionId: sessionId,
+            chunkIndex: chunkIndex,
+            startTimestamp: chunkStartTime ?? now,
+            endTimestamp: now
+        )
+        await onChunkReady?(info)
+
+        // Upload to cloud (and delete local file on success)
         let chunk = ChunkUploader.PendingChunk(
             localURL: chunkURL,
             sessionId: sessionId,
@@ -211,6 +236,11 @@ public actor SessionRecorder {
 
         chunkIndex += 1
         chunkStartTime = now
+    }
+
+    /// Set the chunk-ready callback from outside the actor.
+    public func setOnChunkReady(_ callback: @escaping @Sendable (ChunkInfo) async -> Void) {
+        self.onChunkReady = callback
     }
 
     /// Get current recording status
