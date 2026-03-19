@@ -15,8 +15,8 @@ public actor SessionRecorder {
         public var ffmpegPath: String
         public var storageBaseURL: URL
         public var deviceId: String
-        public var backendURL: String
-        public var backendSecret: String
+        public var backendURL: String?
+        public var backendSecret: String?
 
         public init(
             framesPerSecond: Double = 5.0,
@@ -24,8 +24,8 @@ public actor SessionRecorder {
             ffmpegPath: String,
             storageBaseURL: URL,
             deviceId: String,
-            backendURL: String,
-            backendSecret: String
+            backendURL: String? = nil,
+            backendSecret: String? = nil
         ) {
             self.framesPerSecond = framesPerSecond
             self.chunkDurationSeconds = chunkDurationSeconds
@@ -42,7 +42,7 @@ public actor SessionRecorder {
     private let config: Configuration
     private let encoder: VideoChunkEncoder
     private let storage: ChunkStorage
-    private let uploader: ChunkUploader
+    private let uploader: ChunkUploader?
     private let captureService: ScreenCaptureService
 
     private var captureTask: Task<Void, Never>?
@@ -79,12 +79,19 @@ public actor SessionRecorder {
             chunkDuration: configuration.chunkDurationSeconds,
             ffmpegPath: configuration.ffmpegPath
         )
-        self.uploader = ChunkUploader(
-            backendURL: configuration.backendURL,
-            backendSecret: configuration.backendSecret,
-            deviceId: configuration.deviceId,
-            storage: storage
-        )
+        if let backendURL = configuration.backendURL,
+           let backendSecret = configuration.backendSecret,
+           !backendURL.isEmpty, !backendSecret.isEmpty {
+            self.uploader = ChunkUploader(
+                backendURL: backendURL,
+                backendSecret: backendSecret,
+                deviceId: configuration.deviceId,
+                storage: storage
+            )
+        } else {
+            self.uploader = nil
+            log("SessionRecorder: local-only mode (no backend URL)")
+        }
     }
 
     // MARK: - Recording Control
@@ -222,17 +229,19 @@ public actor SessionRecorder {
         )
         await onChunkReady?(info)
 
-        // Upload to cloud (and delete local file on success)
-        let chunk = ChunkUploader.PendingChunk(
-            localURL: chunkURL,
-            sessionId: sessionId,
-            chunkIndex: chunkIndex,
-            relativePath: chunkPath,
-            startTimestamp: chunkStartTime ?? now,
-            endTimestamp: now
-        )
+        // Upload to cloud (and delete local file on success) — skip in local-only mode
+        if let uploader {
+            let chunk = ChunkUploader.PendingChunk(
+                localURL: chunkURL,
+                sessionId: sessionId,
+                chunkIndex: chunkIndex,
+                relativePath: chunkPath,
+                startTimestamp: chunkStartTime ?? now,
+                endTimestamp: now
+            )
 
-        await uploader.enqueue(chunk)
+            await uploader.enqueue(chunk)
+        }
 
         chunkIndex += 1
         chunkStartTime = now
@@ -245,7 +254,7 @@ public actor SessionRecorder {
 
     /// Get current recording status
     public func getStatus() async -> (isRecording: Bool, isPaused: Bool, sessionId: String?, frameCount: Int, pendingUploads: Int) {
-        let pending = await uploader.pendingCount
+        let pending = await uploader?.pendingCount ?? 0
         return (isRecording, isPaused, sessionId, frameNumber, pending)
     }
 }
