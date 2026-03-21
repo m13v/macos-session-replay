@@ -4,6 +4,8 @@ Session replay for macOS desktop apps. Captures the screen, encodes to H.265 vid
 
 Think [PostHog Session Replay](https://posthog.com/session-replay) or [FullStory](https://www.fullstory.com/), but for native macOS apps.
 
+https://github.com/user-attachments/assets/bbbd214a-5eaa-4856-876d-24f10b20ce3b
+
 ## How it works
 
 ```
