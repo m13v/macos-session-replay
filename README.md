@@ -80,6 +80,19 @@ gs://your-session-recordings/
       ...
 ```
 
+## Web Player
+
+A built-in Next.js app for watching session recordings in the browser. See [`web/README.md`](web/README.md) for full setup instructions.
+
+```bash
+cd web
+npm install
+cp .env.example .env  # fill in Clerk, Neon, Firebase credentials
+npm run dev            # http://localhost:3000
+```
+
+Features: device list with live indicators, video player with 1x/2x/3x speed, timeline with color-coded sessions, keyboard navigation, unread tracking, AI analysis via Gemini.
+
 ## Architecture
 
 | Component | Description |
