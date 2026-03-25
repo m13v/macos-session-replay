@@ -67,6 +67,82 @@ public final class ScreenCaptureService: Sendable {
         }
     }
 
+    // MARK: - Active Window Capture
+
+    /// Capture result that includes the image and metadata about which app/window was captured.
+    public struct CaptureResult: Sendable {
+        public let image: CGImage
+        public let appName: String?
+        public let windowTitle: String?
+    }
+
+    /// Capture the frontmost application's main window as a CGImage.
+    /// Falls back to full display capture if the active window can't be identified.
+    @available(macOS 14.0, *)
+    public func captureActiveWindow() async -> CaptureResult? {
+        let (appName, windowTitle) = Self.getActiveWindowInfo()
+
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else {
+            // No frontmost app — fall back to full display
+            guard let image = await captureFullDisplay() else { return nil }
+            return CaptureResult(image: image, appName: nil, windowTitle: nil)
+        }
+
+        let activePID = frontApp.processIdentifier
+
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: true
+            )
+
+            // Find the largest on-screen window belonging to the frontmost app
+            let appWindows = content.windows.filter {
+                $0.owningApplication?.processID == activePID && $0.isOnScreen && $0.frame.width > 100 && $0.frame.height > 100
+            }
+
+            guard let targetWindow = appWindows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }) else {
+                // App has no sizable windows — fall back to full display
+                guard let image = await captureFullDisplay() else { return nil }
+                return CaptureResult(image: image, appName: appName, windowTitle: windowTitle)
+            }
+
+            let filter = SCContentFilter(desktopIndependentWindow: targetWindow)
+            let config = SCStreamConfiguration()
+            config.scalesToFit = true
+            config.showsCursor = true
+
+            // Use window's actual size, capped
+            let windowWidth = min(targetWindow.frame.width, maxSize)
+            let windowHeight = min(targetWindow.frame.height, maxSize)
+            let aspectRatio = targetWindow.frame.width / targetWindow.frame.height
+
+            var configWidth = windowWidth
+            var configHeight = windowHeight
+            if configWidth / configHeight != aspectRatio {
+                if configWidth / aspectRatio <= maxSize {
+                    configHeight = configWidth / aspectRatio
+                } else {
+                    configWidth = configHeight * aspectRatio
+                }
+            }
+
+            config.width = Int(configWidth)
+            config.height = Int(configHeight)
+
+            let image = try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: config
+            )
+            return CaptureResult(image: image, appName: appName, windowTitle: windowTitle)
+        } catch {
+            log("ScreenCaptureService: Active window capture error: \(error.localizedDescription)")
+            // Fall back to full display
+            guard let image = await captureFullDisplay() else { return nil }
+            return CaptureResult(image: image, appName: appName, windowTitle: windowTitle)
+        }
+    }
+
     // MARK: - Active Window Info
 
     /// Get the active app name and window title
