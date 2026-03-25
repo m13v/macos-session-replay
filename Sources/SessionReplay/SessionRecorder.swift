@@ -54,6 +54,9 @@ public actor SessionRecorder {
     public private(set) var isRecording: Bool = false
     public private(set) var isPaused: Bool = false
 
+    /// Tracks which apps were active during the current chunk (key: "appName||windowTitle").
+    private var currentChunkAppFrames: [String: (appName: String, windowTitle: String?, frameCount: Int)] = [:]
+
     /// Called when a chunk is finalized and ready on disk, before upload.
     /// The consumer can read the file at `localURL` for local analysis.
     /// The chunk will be uploaded (and potentially deleted) after this callback returns.
@@ -66,6 +69,15 @@ public actor SessionRecorder {
         public let chunkIndex: Int
         public let startTimestamp: Date
         public let endTimestamp: Date
+        /// Apps that were active during this chunk, with approximate time spent.
+        public let activeApps: [ActiveAppEntry]
+    }
+
+    /// An app that was in the foreground during a chunk.
+    public struct ActiveAppEntry: Sendable {
+        public let appName: String
+        public let windowTitle: String?
+        public let frameCount: Int
     }
 
     // MARK: - Initialization
@@ -188,23 +200,30 @@ public actor SessionRecorder {
     private func captureFrame() async {
         guard isRecording, !isPaused else { return }
 
-        // Capture full display
-        guard let cgImage = await captureService.captureFullDisplay() else {
+        // Capture active window (falls back to full display if needed)
+        guard let result = await captureService.captureActiveWindow() else {
             return
         }
 
         let now = Date()
         if chunkStartTime == nil {
             chunkStartTime = now
+            currentChunkAppFrames = [:]
         }
 
-        // Get active window info for metadata (will be used for chunk metadata)
-        let (_appName, _windowTitle) = ScreenCaptureService.getActiveWindowInfo()
-        _ = (_appName, _windowTitle)
+        // Track which app was active for this frame
+        let appName = result.appName ?? "Unknown"
+        let key = "\(appName)||\(result.windowTitle ?? "")"
+        if var existing = currentChunkAppFrames[key] {
+            existing.frameCount += 1
+            currentChunkAppFrames[key] = existing
+        } else {
+            currentChunkAppFrames[key] = (appName: appName, windowTitle: result.windowTitle, frameCount: 1)
+        }
 
         // Feed to encoder
         do {
-            let _ = try await encoder.addFrame(image: cgImage, timestamp: now)
+            let _ = try await encoder.addFrame(image: result.image, timestamp: now)
             frameNumber += 1
         } catch {
             logError("SessionRecorder: Failed to encode frame \(frameNumber)", error: error)
@@ -219,13 +238,19 @@ public actor SessionRecorder {
         let chunkURL = await storage.chunkURL(sessionId: sessionId, relativePath: chunkPath)
         let now = Date()
 
+        // Build active app entries sorted by frame count (most active first)
+        let appEntries = currentChunkAppFrames.values
+            .map { ActiveAppEntry(appName: $0.appName, windowTitle: $0.windowTitle, frameCount: $0.frameCount) }
+            .sorted { $0.frameCount > $1.frameCount }
+
         // Notify consumer before upload (they can read the file on disk)
         let info = ChunkInfo(
             localURL: chunkURL,
             sessionId: sessionId,
             chunkIndex: chunkIndex,
             startTimestamp: chunkStartTime ?? now,
-            endTimestamp: now
+            endTimestamp: now,
+            activeApps: appEntries
         )
         await onChunkReady?(info)
 
@@ -245,6 +270,7 @@ public actor SessionRecorder {
 
         chunkIndex += 1
         chunkStartTime = now
+        currentChunkAppFrames = [:]
     }
 
     /// Set the chunk-ready callback from outside the actor.
