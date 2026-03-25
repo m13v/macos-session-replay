@@ -76,11 +76,12 @@ public final class ScreenCaptureService: Sendable {
         public let windowTitle: String?
     }
 
-    /// Capture the frontmost application's main window as a CGImage.
+    /// Capture the frontmost application's focused window as a CGImage.
+    /// Uses CGWindowList z-order to find the topmost window (not largest by area).
     /// Falls back to full display capture if the active window can't be identified.
     @available(macOS 14.0, *)
     public func captureActiveWindow() async -> CaptureResult? {
-        let (appName, windowTitle) = Self.getActiveWindowInfo()
+        let (appName, windowTitle, focusedWindowID) = Self.getActiveWindowInfo()
 
         guard let frontApp = NSWorkspace.shared.frontmostApplication else {
             // No frontmost app — fall back to full display
@@ -96,12 +97,21 @@ public final class ScreenCaptureService: Sendable {
                 onScreenWindowsOnly: true
             )
 
-            // Find the largest on-screen window belonging to the frontmost app
             let appWindows = content.windows.filter {
                 $0.owningApplication?.processID == activePID && $0.isOnScreen && $0.frame.width > 100 && $0.frame.height > 100
             }
 
-            guard let targetWindow = appWindows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }) else {
+            // Prefer the focused window (matched by CGWindowList z-order),
+            // fall back to largest if the focused window ID isn't in SCKit's list
+            let targetWindow: SCWindow?
+            if let fwID = focusedWindowID {
+                targetWindow = appWindows.first(where: { $0.windowID == fwID })
+                    ?? appWindows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+            } else {
+                targetWindow = appWindows.max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+            }
+
+            guard let targetWindow else {
                 // App has no sizable windows — fall back to full display
                 guard let image = await captureFullDisplay() else { return nil }
                 return CaptureResult(image: image, appName: appName, windowTitle: windowTitle)
@@ -145,10 +155,12 @@ public final class ScreenCaptureService: Sendable {
 
     // MARK: - Active Window Info
 
-    /// Get the active app name and window title
-    public static func getActiveWindowInfo() -> (appName: String?, windowTitle: String?) {
+    /// Get the active app name, window title, and focused window ID.
+    /// Uses CGWindowList z-order (front-to-back) to find the topmost normal-layer window
+    /// for the frontmost app, rather than the largest window by area.
+    public static func getActiveWindowInfo() -> (appName: String?, windowTitle: String?, focusedWindowID: CGWindowID?) {
         guard let frontApp = NSWorkspace.shared.frontmostApplication else {
-            return (nil, nil)
+            return (nil, nil, nil)
         }
 
         let appName = frontApp.localizedName
@@ -157,29 +169,27 @@ public final class ScreenCaptureService: Sendable {
         guard let windowList = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
         ) as? [[String: Any]] else {
-            return (appName, nil)
+            return (appName, nil, nil)
         }
 
-        // Find largest window for this PID
-        var bestTitle: String?
-        var bestArea: CGFloat = 0
-
+        // CGWindowList returns windows in z-order (front to back).
+        // Find the first normal-layer (layer 0) window for this PID — that's the focused one.
         for window in windowList {
             guard let windowPID = window[kCGWindowOwnerPID as String] as? Int32,
                   windowPID == activePID,
+                  let layer = window[kCGWindowLayer as String] as? Int,
+                  layer == 0,
                   let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
                   let width = bounds["Width"],
                   let height = bounds["Height"],
                   width > 100 && height > 100
             else { continue }
 
-            let area = width * height
-            if area > bestArea {
-                bestArea = area
-                bestTitle = window[kCGWindowName as String] as? String
-            }
+            let title = window[kCGWindowName as String] as? String
+            let windowID = window[kCGWindowNumber as String] as? CGWindowID
+            return (appName, title, windowID)
         }
 
-        return (appName, bestTitle)
+        return (appName, nil, nil)
     }
 }
