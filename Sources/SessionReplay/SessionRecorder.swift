@@ -9,6 +9,15 @@ public actor SessionRecorder {
 
     // MARK: - Configuration
 
+    /// Controls what region of the screen is captured per frame.
+    public enum CaptureMode: Sendable {
+        /// Capture only the frontmost application's focused window.
+        /// Falls back to full display if the active window can't be identified.
+        case activeWindow
+        /// Capture the entire primary display.
+        case fullDisplay
+    }
+
     public struct Configuration: Sendable {
         public var framesPerSecond: Double
         public var chunkDurationSeconds: TimeInterval
@@ -17,6 +26,7 @@ public actor SessionRecorder {
         public var deviceId: String
         public var backendURL: String?
         public var backendSecret: String?
+        public var captureMode: CaptureMode
 
         public init(
             framesPerSecond: Double = 5.0,
@@ -25,7 +35,8 @@ public actor SessionRecorder {
             storageBaseURL: URL,
             deviceId: String,
             backendURL: String? = nil,
-            backendSecret: String? = nil
+            backendSecret: String? = nil,
+            captureMode: CaptureMode = .activeWindow
         ) {
             self.framesPerSecond = framesPerSecond
             self.chunkDurationSeconds = chunkDurationSeconds
@@ -34,6 +45,7 @@ public actor SessionRecorder {
             self.deviceId = deviceId
             self.backendURL = backendURL
             self.backendSecret = backendSecret
+            self.captureMode = captureMode
         }
     }
 
@@ -200,10 +212,19 @@ public actor SessionRecorder {
     private func captureFrame() async {
         guard isRecording, !isPaused else { return }
 
-        // Capture active window (falls back to full display if needed)
-        guard let result = await captureService.captureActiveWindow() else {
-            return
+        let result: ScreenCaptureService.CaptureResult?
+        switch config.captureMode {
+        case .activeWindow:
+            result = await captureService.captureActiveWindow()
+        case .fullDisplay:
+            if let image = await captureService.captureFullDisplay() {
+                let (appName, windowTitle, _) = ScreenCaptureService.getActiveWindowInfo()
+                result = ScreenCaptureService.CaptureResult(image: image, appName: appName, windowTitle: windowTitle)
+            } else {
+                result = nil
+            }
         }
+        guard let result else { return }
 
         let now = Date()
         if chunkStartTime == nil {
