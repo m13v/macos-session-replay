@@ -307,6 +307,7 @@ public actor VideoChunkEncoder {
             ffmpegStdin = nil
         }
 
+        var ffmpegSucceeded = false
         if let process = ffmpegProcess {
             let pid = process.processIdentifier
             let frameCount = frameTimestamps.count
@@ -326,14 +327,28 @@ public actor VideoChunkEncoder {
                 logError("VideoChunkEncoder: FFmpeg exited with status \(process.terminationStatus)")
             } else {
                 log("VideoChunkEncoder: Finalized chunk with \(frameCount) frames")
+                ffmpegSucceeded = true
             }
 
             ffmpegProcess = nil
         }
 
-        // Notify about completed chunk
-        if let chunkPath {
-            onChunkFinalized?(chunkPath)
+        // Only notify about completed chunk if ffmpeg succeeded and file is non-empty
+        if let chunkPath, ffmpegSucceeded, let videosDir = videosDirectory {
+            let fullPath = videosDir.appendingPathComponent(chunkPath)
+            let fileSize = (try? FileManager.default.attributesOfItem(atPath: fullPath.path)[.size] as? Int) ?? 0
+            if fileSize > 0 {
+                onChunkFinalized?(chunkPath)
+            } else {
+                logError("VideoChunkEncoder: Skipping empty chunk \(chunkPath) (\(fileSize) bytes)")
+                try? FileManager.default.removeItem(at: fullPath)
+            }
+        } else if let chunkPath, !ffmpegSucceeded {
+            logError("VideoChunkEncoder: Skipping chunk \(chunkPath) — ffmpeg failed")
+            if let videosDir = videosDirectory {
+                let fullPath = videosDir.appendingPathComponent(chunkPath)
+                try? FileManager.default.removeItem(at: fullPath)
+            }
         }
 
         // Reset state
