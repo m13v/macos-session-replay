@@ -98,7 +98,14 @@ public actor ChunkUploader {
         // 2. Read chunk data
         let chunkData = try Data(contentsOf: chunk.localURL)
 
-        // 3. Upload to GCS via signed URL
+        // 3. Skip empty files (ffmpeg crash or interrupted encoding)
+        guard chunkData.count > 0 else {
+            log("ChunkUploader: Skipping empty chunk \(chunk.chunkIndex) (0 bytes) — deleting local file")
+            try? FileManager.default.removeItem(at: chunk.localURL)
+            return
+        }
+
+        // 4. Upload to GCS via signed URL
         var request = URLRequest(url: signedURL)
         request.httpMethod = "PUT"
         request.setValue("video/mp4", forHTTPHeaderField: "Content-Type")
