@@ -312,19 +312,28 @@ public actor VideoChunkEncoder {
             let pid = process.processIdentifier
             let frameCount = frameTimestamps.count
 
-            let watchdog = Task.detached(priority: .background) {
-                try? await Task.sleep(nanoseconds: 10_000_000_000)
-                if process.isRunning {
-                    logError("VideoChunkEncoder: ffmpeg hung for 10s — force killing PID \(pid)")
-                    kill(pid, SIGKILL)
+            // Wait for ffmpeg on a background thread to avoid blocking the
+            // Swift Concurrency cooperative thread pool. waitUntilExit() is
+            // synchronous and can take seconds while ffmpeg finishes encoding.
+            let status = await withCheckedContinuation { (continuation: CheckedContinuation<Int32, Never>) in
+                DispatchQueue.global(qos: .utility).async {
+                    // 10-second watchdog in case ffmpeg hangs
+                    let watchdogItem = DispatchWorkItem {
+                        if process.isRunning {
+                            logError("VideoChunkEncoder: ffmpeg hung for 10s — force killing PID \(pid)")
+                            kill(pid, SIGKILL)
+                        }
+                    }
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 10, execute: watchdogItem)
+
+                    process.waitUntilExit()
+                    watchdogItem.cancel()
+                    continuation.resume(returning: process.terminationStatus)
                 }
             }
 
-            process.waitUntilExit()
-            watchdog.cancel()
-
-            if process.terminationStatus != 0 {
-                logError("VideoChunkEncoder: FFmpeg exited with status \(process.terminationStatus)")
+            if status != 0 {
+                logError("VideoChunkEncoder: FFmpeg exited with status \(status)")
             } else {
                 log("VideoChunkEncoder: Finalized chunk with \(frameCount) frames")
                 ffmpegSucceeded = true
