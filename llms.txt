@@ -1,0 +1,119 @@
+# macOS Session Replay
+
+> Session replay for native macOS desktop apps. Like PostHog Session Replay or FullStory, but purpose-built for native Swift applications.
+
+Source: https://github.com/m13v/macos-session-replay
+License: MIT
+
+## What It Is
+
+A Swift Package that captures macOS screen recordings at 5 FPS, encodes them to H.265 video using hardware acceleration, and uploads 60-second MP4 chunks to Google Cloud Storage. Includes a Next.js web player for watching recordings in the browser and a Gemini Vision AI pipeline that analyzes recorded sessions to extract user behavior insights.
+
+## Who It's For
+
+macOS app developers who need to observe how real users interact with their native desktop apps. Useful for debugging UI issues, understanding user workflows, and identifying tasks that could be automated or improved.
+
+## Swift SDK
+
+The SDK is distributed as a Swift Package (`SessionReplay` library) targeting macOS 14.0+ and Swift 5.9+.
+
+### Core Components
+
+- **SessionRecorder**: Main orchestrator actor. Manages the capture timer, coordinates encoding, handles upload queueing. Supports `start()`, `stop()`, `pause()`, and `resume()` lifecycle methods.
+- **ScreenCaptureService**: Captures frames via Apple's ScreenCaptureKit (`SCScreenshotManager.captureImage`). Supports two modes: `activeWindow` (captures only the frontmost app's focused window) and `fullDisplay` (captures the entire primary display). Falls back from active window to full display when needed.
+- **VideoChunkEncoder**: Actor-based H.265 encoder using ffmpeg with the `hevc_videotoolbox` hardware encoder. Pipes raw BGRA pixel data to ffmpeg's stdin. Produces fragmented MP4 files (`-movflags frag_keyframe+empty_moov+default_base_moof`). Handles aspect ratio changes by starting new chunks with a 2-second stability debounce. Includes a staleness timer that auto-finalizes chunks if no new frames arrive. Has emergency reset logic after 5 consecutive ffmpeg failures.
+- **ChunkUploader**: Uploads completed chunks to GCS via V4 signed URLs obtained from a backend endpoint. Uses exponential backoff (up to 5 retries, capped at 5 minutes). Deletes local files after confirmed upload.
+- **ChunkStorage**: Local file management. Organizes chunks by session ID with day-based subdirectories (`{date}/chunk_{time}.mp4`).
+- **PowerMonitor**: Monitors battery vs AC power via IOKit. Publishes `isOnBattery` state so the app can pause recording on battery to conserve resources.
+
+### Configuration
+
+```swift
+let config = SessionRecorder.Configuration(
+    framesPerSecond: 5.0,          // capture rate
+    chunkDurationSeconds: 60.0,     // seconds per video chunk
+    ffmpegPath: "/opt/homebrew/bin/ffmpeg",
+    storageBaseURL: localDirectory,
+    deviceId: "device-uuid",
+    backendURL: "https://your-backend.com",   // optional, nil = local-only mode
+    backendSecret: "your-secret",              // optional
+    captureMode: .activeWindow                 // or .fullDisplay
+)
+```
+
+When `backendURL` is nil, the SDK runs in local-only mode: chunks are encoded and stored on disk but not uploaded. The `onChunkReady` callback fires for each finalized chunk, giving consumers access to the local file path, session ID, chunk index, timestamps, and a list of active apps with frame counts.
+
+### Requirements
+
+- macOS 14.0+, Swift 5.9+
+- Screen Recording system permission
+- ffmpeg with `hevc_videotoolbox` support (Homebrew or bundled)
+
+### Resource Usage (at 5 FPS, H.265)
+
+- CPU: minimal (hardware encoder via VideoToolbox)
+- Storage: 2 to 5 MB/min (deleted after upload in cloud mode)
+- Upload bandwidth: 120 to 300 MB/hour
+- Memory: 50 to 100 MB
+
+## Cloud Storage (GCS)
+
+Chunks upload to a GCS bucket organized as `{device_id}/{session_id}/chunk_NNNN.mp4`. The SDK calls `POST /api/session-recording/get-upload-url` on your backend to obtain V4 signed URLs, then PUTs the MP4 data directly to GCS. A Rust/Axum backend template is provided in `Examples/backend-template.rs`. Recommended bucket lifecycle: auto-delete after 30 days.
+
+## Web Player
+
+A Next.js (App Router) web application for watching session recordings in the browser.
+
+### Features
+
+- Device list with live status indicators and unread chunk counts
+- Video player with 1x, 2x, 3x playback speed control
+- Timeline visualization with color-coded sessions
+- Keyboard navigation (arrow keys, Escape)
+- Auto-advance to the next chunk on completion
+- Per-user "mark as read" tracking (stored in Neon PostgreSQL)
+- Device deletion
+- AI-powered session analysis via Gemini
+
+### Stack
+
+- Next.js 16 with App Router
+- Clerk for authentication
+- Neon (PostgreSQL) for viewed-chunk tracking
+- Firebase Admin SDK for GCS access and UID resolution
+- Tailwind CSS v4
+- Gemini Pro for video analysis
+
+## Gemini Vision AI Analysis Pipeline
+
+The `/api/session-recordings/analyze` endpoint downloads up to 60 video chunks (about 60 minutes of recording), sends them to Google's Gemini Pro model for multimodal analysis, and returns structured insights. Small chunks (under 1.5 MB) are sent as inline base64; larger chunks use Gemini's resumable File API with automatic cleanup.
+
+The default analysis prompt identifies the single most impactful task an AI agent could take off the user's plate, considering what AI agents are fast at (bulk text processing, codebase search, shell commands, boilerplate code) versus slow at (visual inspection, creative decisions, real-time judgment). Custom prompts are supported.
+
+## Architecture Overview
+
+```
+Swift App (SDK)
+  ScreenCaptureService  ->  5 FPS frame capture (ScreenCaptureKit)
+  VideoChunkEncoder     ->  H.265 encoding (ffmpeg + hevc_videotoolbox)
+  ChunkStorage          ->  Local file management (day-based directories)
+  ChunkUploader         ->  GCS upload via signed URLs
+  PowerMonitor          ->  Pause on battery
+
+Backend (your server)
+  POST /api/session-recording/get-upload-url  ->  V4 signed URL generation
+
+Web Player (Next.js)
+  GCS bucket listing    ->  Device and session discovery
+  Signed URL playback   ->  Stream H.265 chunks in browser
+  Neon PostgreSQL       ->  Viewed-chunk tracking
+  Gemini Pro API        ->  AI video analysis
+```
+
+## Differentiators vs Alternatives
+
+- **PostHog Session Replay / FullStory / LogRocket**: These tools target web apps using DOM snapshotting. macOS Session Replay captures native macOS desktop apps via ScreenCaptureKit, producing actual video rather than DOM reconstructions.
+- **Hardware-accelerated encoding**: Uses Apple's VideoToolbox H.265 encoder via ffmpeg, keeping CPU overhead minimal compared to software encoding.
+- **Active window tracking**: Captures only the frontmost window by default, automatically tracking which app and window title are active per frame.
+- **Local-only mode**: Works entirely offline without a backend. Chunks stay on disk and the `onChunkReady` callback enables custom processing.
+- **AI analysis built in**: Gemini Vision integration analyzes recorded sessions and identifies automation opportunities, going beyond passive replay into actionable insights.
