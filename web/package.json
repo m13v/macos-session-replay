@@ -10,11 +10,17 @@
   },
   "dependencies": {
     "@clerk/nextjs": "^6.36.10",
+    "@m13v/seo-components": "^0.14.1",
     "@neondatabase/serverless": "^1.0.2",
+    "@remotion/player": "^4.0.448",
+    "@seo/components": "npm:@m13v/seo-components@^0.14.1",
     "firebase-admin": "^13.6.0",
+    "framer-motion": "^12.38.0",
+    "lottie-react": "^2.4.1",
     "next": "16.1.4",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "remotion": "^4.0.448"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
