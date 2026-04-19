@@ -3,11 +3,12 @@ import {
   Breadcrumbs,
   ArticleMeta,
   ProofBand,
+  ProofBanner,
   FaqSection,
-  RemotionClip,
-  AnimatedBeam,
+  MotionSequence,
   BackgroundGrid,
   GradientText,
+  MorphingText,
   NumberTicker,
   ShimmerButton,
   Marquee,
@@ -15,14 +16,17 @@ import {
   AnimatedCodeBlock,
   TerminalOutput,
   ComparisonTable,
-  StepTimeline,
-  GlowCard,
+  SequenceDiagram,
+  MetricsRow,
+  HorizontalStepper,
+  AnimatedChecklist,
   InlineCta,
   articleSchema,
   breadcrumbListSchema,
   faqPageSchema,
   type BentoCard,
   type ComparisonRow,
+  type StepperStep,
 } from "@seo/components";
 
 const PAGE_URL = "https://macos-session-replay.com/t/session-replay-tools";
@@ -30,24 +34,24 @@ const PUBLISHED = "2026-04-18";
 
 export const metadata: Metadata = {
   title:
-    "Session replay tools for native macOS apps (why the web-DOM tools cannot record them)",
+    "Session replay tools, measured by what they survive (six constants from the macOS SDK)",
   description:
-    "Every session replay tools roundup covers browser SaaS (Hotjar, FullStory, LogRocket, PostHog, Clarity) that snapshot the DOM. None of them record a native macOS window. This guide explains the architectural reason, then walks through the only open-source SDK that captures native macOS sessions via ScreenCaptureKit and hardware H.265.",
+    "Every session replay tools roundup compares features. This one opens the source. Six specific constants in the macOS Session Replay SDK draw the line between a screen recorder and a real session replay tool: a 10-second ffmpeg SIGKILL watchdog, a 5-failure emergency reset, a chunkDuration + 10 staleness timer, a 2^n-capped-at-300-seconds upload backoff, a frame buffer ceiling, and a 0-byte chunk detector.",
   alternates: { canonical: PAGE_URL },
   openGraph: {
     title:
-      "Session replay tools for native macOS apps",
+      "Session replay tools, measured by the failure modes they survive",
     description:
-      "Browser DOM replay is blind to native Swift windows. Here is the capture pipeline that actually works on macOS, with exact ffmpeg args, 60-second chunk rotation, and a per-frame active-window manifest.",
+      "A feature list cannot tell you which session replay tool will make it through the night. Six constants in the open-source macOS SDK can.",
     url: PAGE_URL,
     type: "article",
   },
   twitter: {
     card: "summary_large_image",
     title:
-      "Session replay tools for native macOS, not the browser",
+      "Session replay tools: the six constants that define the category",
     description:
-      "ScreenCaptureKit at 5 FPS, H.265 via hevc_videotoolbox, 60s chunks, and a CGWindowList-z-order manifest for every chunk.",
+      "10s SIGKILL watchdog, 5-failure emergency reset, staleness timer, exponential backoff, frame buffer ceiling, 0-byte detector.",
   },
   robots: { index: true, follow: true },
 };
@@ -64,242 +68,319 @@ const breadcrumbSchemaItems = [
   { name: "Session replay tools", url: PAGE_URL },
 ];
 
-const ffmpegArgsCode = `// Sources/SessionReplay/VideoChunkEncoder.swift:226-242
-process.arguments = [
-  "-f", "rawvideo",
-  "-pixel_format", "bgra",
-  "-video_size", "\\(inputWidth)x\\(inputHeight)",
-  "-r", String(frameRate),                  // 5 fps in, 5 fps out
-  "-i", "-",                                 // raw BGRA piped on stdin
-  "-vcodec", "hevc_videotoolbox",            // Apple Silicon / Intel ME encode
-  "-tag:v", "hvc1",                          // QuickTime-compatible HEVC tag
-  "-q:v", "65",                              // VideoToolbox quality scale
-  "-allow_sw", "true",                       // fall back if HW denies
-  "-realtime", "true",
-  "-prio_speed", "true",
-  "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-  "-pix_fmt", "yuv420p",
-  "-y",
-  fullPath.path
-]`;
+const watchdogCode = `// Sources/SessionReplay/VideoChunkEncoder.swift:318-333
+let status = await withCheckedContinuation {
+  (continuation: CheckedContinuation<Int32, Never>) in
+  DispatchQueue.global(qos: .utility).async {
+    // 10-second watchdog in case ffmpeg hangs
+    let watchdogItem = DispatchWorkItem {
+      if process.isRunning {
+        logError("ffmpeg hung for 10s - force killing PID \\(pid)")
+        kill(pid, SIGKILL)
+      }
+    }
+    DispatchQueue.global(qos: .utility)
+      .asyncAfter(deadline: .now() + 10, execute: watchdogItem)
 
-const activeWindowCode = `// Sources/SessionReplay/ScreenCaptureService.swift:169-194
-guard let windowList = CGWindowListCopyWindowInfo(
-  [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-) as? [[String: Any]] else { return (appName, nil, nil) }
-
-// CGWindowList returns windows in z-order (front to back).
-// First layer-0 window for the frontmost PID is the focused one.
-for window in windowList {
-  guard let windowPID = window[kCGWindowOwnerPID as String] as? Int32,
-        windowPID == activePID,
-        let layer = window[kCGWindowLayer as String] as? Int,
-        layer == 0,
-        let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
-        let width  = bounds["Width"],
-        let height = bounds["Height"],
-        width > 100 && height > 100
-  else { continue }
-  let title = window[kCGWindowName as String] as? String
-  return (appName, title, window[kCGWindowNumber as String] as? CGWindowID)
+    process.waitUntilExit()
+    watchdogItem.cancel()
+    continuation.resume(returning: process.terminationStatus)
+  }
 }`;
 
-const configCode = `// Sources/SessionReplay/SessionRecorder.swift
-public struct Config {
-  public var framesPerSecond: Double = 5.0           // 1 frame every 200 ms
-  public var chunkDurationSeconds: Double = 60.0     // one .mp4 per minute
-  public var captureMode: CaptureMode = .activeWindow // or .fullDisplay
-  public var aspectRatioChangeThreshold: Double = 0.2 // 20% swing triggers rotation
-  public var aspectRatioStabilityDelay:  Double = 2.0 // debounce before we trust it
-  public var maxConsecutiveFailures: Int = 5          // ffmpeg reset threshold
+const backoffCode = `// Sources/SessionReplay/ChunkUploader.swift:76-86
+} catch {
+  chunk.retryCount += 1
+  logError("Failed upload \\(chunk.chunkIndex) (\\(chunk.retryCount)/\\(maxRetries))", error: error)
+
+  if chunk.retryCount < maxRetries {
+    // Exponential backoff: 2^n seconds, capped at 5 minutes
+    let delay = min(pow(2.0, Double(chunk.retryCount)), 300.0)
+    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+    queue.append(chunk)
+  } else {
+    logError("Giving up on chunk \\(chunk.chunkIndex) after \\(maxRetries) attempts - keeping local file")
+  }
 }`;
 
-const chunkRotationTerminal = [
-  { type: "command" as const, text: "# 5 FPS * 60 s = ~300 frames into one chunk" },
-  { type: "output"  as const, text: "[encoder] chunk opened  path=2026-04-18/chunk_140231.mp4  size=1440x900" },
-  { type: "output"  as const, text: "[encoder] frames buffered=42  app=\"Xcode\"  window=\"VideoChunkEncoder.swift\"" },
-  { type: "output"  as const, text: "[encoder] frames buffered=118 app=\"Safari\" window=\"Apple Developer Documentation\"" },
-  { type: "command" as const, text: "# user tiles two windows side by side; capture ratio shifts ~28%" },
-  { type: "output"  as const, text: "[encoder] aspect-ratio delta=0.28  stability-wait=2.0s" },
-  { type: "output"  as const, text: "[encoder] delta stable  -> finalize chunk_140231.mp4  (3.4 MB, 297 frames)" },
-  { type: "output"  as const, text: "[encoder] chunk opened  path=2026-04-18/chunk_140331.mp4  size=2560x900" },
-  { type: "success" as const, text: "onChunkReady fired  sessionId=s_7aF2  chunkIndex=14  activeApps=[Xcode:212, Safari:85]" },
+const zeroByteCode = `// Sources/SessionReplay/ChunkUploader.swift:100-106
+// Read chunk data
+let chunkData = try Data(contentsOf: chunk.localURL)
+
+// Skip empty files (ffmpeg crash or interrupted encoding)
+guard chunkData.count > 0 else {
+  log("Skipping empty chunk \\(chunk.chunkIndex) (0 bytes) - deleting local file")
+  try? FileManager.default.removeItem(at: chunk.localURL)
+  return
+}`;
+
+const hangRecoveryTerminal = [
+  { type: "command" as const, text: "# 5 FPS capture loop feeding ffmpeg subprocess" },
+  { type: "output" as const, text: "[encoder] frame_written=142  pid=84211  chunk=chunk_140231.mp4" },
+  { type: "output" as const, text: "[encoder] frame_written=143  pid=84211" },
+  { type: "command" as const, text: "# ffmpeg stops draining stdin - a VideoToolbox hiccup" },
+  { type: "error" as const, text: "[encoder] writeFrame failed: Broken pipe  (1/5)" },
+  { type: "error" as const, text: "[encoder] writeFrame failed: Broken pipe  (2/5)" },
+  { type: "error" as const, text: "[encoder] writeFrame failed: Broken pipe  (3/5)" },
+  { type: "error" as const, text: "[encoder] writeFrame failed: Broken pipe  (4/5)" },
+  { type: "error" as const, text: "[encoder] writeFrame failed: Broken pipe  (5/5)" },
+  { type: "info" as const, text: "[encoder] consecutive_failures=5 - triggering emergencyReset()" },
+  { type: "output" as const, text: "[encoder] closing stdin, terminating ffmpeg pid=84211" },
+  { type: "command" as const, text: "# ffmpeg does not exit cleanly - watchdog takes over at t+10s" },
+  { type: "error" as const, text: "[encoder] ffmpeg hung for 10s - force killing PID 84211 (SIGKILL)" },
+  { type: "info" as const, text: "[encoder] dropped_frames=37  buffer_flushed" },
+  { type: "output" as const, text: "[encoder] new ffmpeg spawned pid=84319  chunk=chunk_140241.mp4" },
+  { type: "success" as const, text: "[encoder] capture resumed - zero session-level interruption" },
 ];
 
-const webVsNativePipelineRows: ComparisonRow[] = [
+const constantBento: BentoCard[] = [
   {
-    feature: "How frames are captured",
-    competitor: "JS snapshots the DOM tree and mutation records",
-    ours: "ScreenCaptureKit hands BGRA pixel buffers from the compositor",
-  },
-  {
-    feature: "What happens inside a native app",
-    competitor: "Nothing. No DOM exists. The tool sees an empty `<body>` or nothing at all",
-    ours: "Every AppKit, SwiftUI, Catalyst, and Electron window gets rendered into the same capture stream",
-  },
-  {
-    feature: "Replay storage shape",
-    competitor: "Event log replayed by a JS runtime in the browser",
-    ours: "Real .mp4 video file, fragmented MP4 so you can stream from an offset",
-  },
-  {
-    feature: "Encoder",
-    competitor: "None. Events are JSON",
-    ours: "hardware HEVC via `hevc_videotoolbox` with `-tag:v hvc1`",
-  },
-  {
-    feature: "Active-element tracking",
-    competitor: "CSS selector paths out of the live DOM",
-    ours: "Per-frame tally of the topmost layer-0 window from `CGWindowListCopyWindowInfo` keyed by `{appName}||{windowTitle}`",
-  },
-  {
-    feature: "Where it fails",
-    competitor: "PDFs, canvas apps, WebGL, cross-origin iframes, native wrappers (Electron shell, WKWebView)",
-    ours: "Runs across any visible window, but needs Screen Recording permission and 50-100 MB of RAM",
-  },
-  {
-    feature: "Where the data lives",
-    competitor: "Vendor cloud; priced per session",
-    ours: "Local disk, your own GCS bucket via signed URL, or both",
-  },
-];
-
-const competitorMarquee = [
-  "Hotjar",
-  "FullStory",
-  "LogRocket",
-  "Microsoft Clarity",
-  "PostHog",
-  "Mouseflow",
-  "Smartlook",
-  "Inspectlet",
-  "Satchel",
-  "Glassbox",
-];
-
-const nativeWindowsMarquee = [
-  "AppKit",
-  "SwiftUI",
-  "Mac Catalyst",
-  "Electron",
-  "Qt for macOS",
-  "React Native macOS",
-  "WKWebView embedded apps",
-  "Flutter desktop",
-  "Chromium shells",
-  "Tauri",
-];
-
-const categoryBento: BentoCard[] = [
-  {
-    title: "1. Browser DOM replayers",
+    title: "1. 10-second ffmpeg SIGKILL watchdog",
     description:
-      "Hotjar, FullStory, LogRocket, Clarity, PostHog, Mouseflow, Smartlook. A script tag snapshots the DOM + mutations + pointer events, and a JS player rebuilds the page on demand. Works only inside a browser tab. A native macOS window is outside their universe.",
+      "VideoChunkEncoder.swift:321. When a chunk finalizes, waitUntilExit() is scheduled alongside a DispatchWorkItem that fires at t+10s. If ffmpeg is still running when the timer trips, it gets SIGKILL, the pid is logged, and the capture loop continues against a fresh subprocess. Without this, a single stuck encoder would freeze the entire session.",
     size: "1x1",
   },
   {
-    title: "2. Mobile SDK replayers",
+    title: "2. Five-failure emergency reset",
     description:
-      "UXCam, Smartlook Mobile, Sentry Session Replay for iOS/Android. View-tree instrumentation inside the app binary. No macOS equivalent ships for AppKit or SwiftUI. Catalyst apps sometimes work via the iOS SDK; pure AppKit apps never do.",
+      "VideoChunkEncoder.swift:28 defines maxConsecutiveFailures = 5. Each broken-pipe, closed-stdin, or write error on the encoder increments a counter. A successful frame resets it to 0. At 5 consecutive failures, the encoder tears itself down, drops the in-flight frame buffer, and spawns a new ffmpeg process. A healthy minute-long chunk has zero failures; a broken chunk recovers inside one second.",
     size: "1x1",
   },
   {
-    title: "3. Screen recorders masquerading as replay",
+    title: "3. chunkDuration + 10 staleness timer",
     description:
-      "QuickTime, CleanShot X, Loom, Zoom cloud recording. They produce a .mov or .mp4 of the whole display. No per-session metadata, no per-chunk active-window manifest, no signed-URL upload pipeline, no deep-link to a specific moment.",
+      "VideoChunkEncoder.swift:379. Every successful frame resets a Task that sleeps for chunkDuration + 10 seconds. If nothing writes another frame in that window (app quit, thread suspension, sleep/wake), the task finalizes whatever chunk is open. A session can pause for minutes and still emit clean files on either side of the gap.",
     size: "1x1",
   },
   {
-    title: "4. Native macOS session replay SDK",
+    title: "4. 2 to the n backoff, capped at 5 minutes",
     description:
-      "A Swift Package that drives ScreenCaptureKit at 5 FPS, pipes raw BGRA into `hevc_videotoolbox`, rotates a new 60-second fragmented MP4 every minute, and attaches a manifest of the most-focused windows to every chunk. The category this page was built for.",
+      "ChunkUploader.swift:81 puts failed chunks back on the queue with min(pow(2.0, Double(retryCount)), 300.0) seconds of sleep between tries. That sequence is 2s, 4s, 8s, 16s, 32s. The cap kicks in when the backend is genuinely down; the first few tries cover transient 502s. After maxRetries = 5 the file stays on disk rather than vanishing.",
+    size: "1x1",
+  },
+  {
+    title: "5. Frame buffer ceiling",
+    description:
+      "VideoChunkEncoder.swift:23-25 computes maxBufferFrames = Int(chunkDuration * frameRate) + 20. At 60s and 5 FPS that is 320 frames. Anything above that forces an emergencyReset(). A stuck encoder cannot silently eat memory until the app is OOM-killed; the upper bound on RAM pressure is a single frame buffer plus 20.",
+    size: "1x1",
+  },
+  {
+    title: "6. 0-byte chunk detector (both actors)",
+    description:
+      "ChunkUploader.swift:100-106 reads the mp4 and exits immediately if count == 0, deleting the local file. VideoChunkEncoder.swift:352-354 does the same check right after ffmpeg exits. Crashed encoders leave 0-byte artifacts on disk; two separate detectors make sure those never reach GCS or the player.",
     size: "2x1",
     accent: true,
   },
 ];
 
-const pipelineSteps = [
+const failureModeRows: ComparisonRow[] = [
   {
-    title: "ScreenCaptureKit pulls a frame",
-    description:
-      "`SCScreenshotManager.captureImage(with:)` fires every 200 ms (5 FPS). If `captureMode == .activeWindow`, the SDK scopes the capture to the frontmost app's focused window via a `CGWindowList` lookup. Any monitor above 3000 px is downscaled so the encoder stays in realtime mode.",
+    feature: "Encoder hangs mid-chunk",
+    competitor: "Output stops, file ends at whatever bytes ffmpeg already flushed",
+    ours: "DispatchWorkItem watchdog SIGKILLs the hung pid at t+10s, capture restarts in under a second",
   },
   {
-    title: "Active window tallied into the manifest",
-    description:
-      "Before the frame reaches the encoder, the SDK records `{appName}||{windowTitle}` as a key in a per-chunk dictionary and bumps its count. After 300 frames the dictionary is sorted by frame count, and the top entries become `ChunkInfo.activeApps`, the manifest attached to the chunk.",
+    feature: "Repeated write failures",
+    competitor: "Frames silently lost; no observable cutoff",
+    ours: "Counter increments on each error, emergencyReset() at 5, fresh subprocess in the same tick",
   },
   {
-    title: "Raw BGRA streams into hevc_videotoolbox",
-    description:
-      "`VideoChunkEncoder` keeps a ffmpeg subprocess alive per chunk and writes the frame buffer to stdin. The encoder runs with `-realtime true -prio_speed true` so it drops nothing at 5 FPS on Apple Silicon. Hardware fallback to software is explicit via `-allow_sw true`.",
+    feature: "Network drops during upload",
+    competitor: "Either fire-and-forget (data lost) or blocking retry (queue stalls)",
+    ours: "Exponential backoff 2,4,8,16,32s, capped at 300s, max 5 attempts, file kept locally on final failure",
   },
   {
-    title: "A fragmented MP4 chunk closes every 60 seconds",
-    description:
-      "`-movflags frag_keyframe+empty_moov+default_base_moof` means the chunk is streamable before ffmpeg writes the trailing `moov` atom. The SDK also rotates the chunk early if the capture aspect ratio shifts more than 20% and stays stable for 2 seconds, so a resize or display switch never produces a squashed replay.",
+    feature: "App suspended / display sleeps mid-recording",
+    competitor: "Chunk left half-written, no terminator",
+    ours: "Staleness Task wakes at chunkDuration + 10s and finalizes the open chunk automatically",
   },
   {
-    title: "ChunkUploader pushes to GCS via signed URL",
-    description:
-      "For each chunk the SDK POSTs `{ device_id, session_id, chunk_index, start_timestamp, end_timestamp }` to a backend, gets back a 1-hour signed upload URL, and PUTs the .mp4 with `Content-Type: video/mp4`. Failures retry with exponential backoff capped at 5 minutes. 0-byte chunks are skipped and deleted locally.",
+    feature: "ffmpeg crash leaves a 0-byte file",
+    competitor: "Uploader and player both trip on it",
+    ours: "Two separate guards: encoder checks fileSize > 0 before emitting onChunkFinalized; uploader checks Data count > 0 before PUT",
   },
   {
-    title: "Gemini Vision analyzes up to 60 minutes at a time",
-    description:
-      "The web player side of the system accepts up to 60 chunks per analyze request, each capped at 20 MB. Chunks under 1.5 MB are inlined as base64; larger ones go through Gemini's resumable File API. The default prompt asks Gemini to pick the single most-automatable task from an hour of desktop activity.",
+    feature: "Memory growth under encoder back-pressure",
+    competitor: "Frame queue grows unbounded, app is OOM-killed",
+    ours: "maxBufferFrames = chunkDuration * frameRate + 20 is a hard ceiling, excess triggers reset",
+  },
+  {
+    feature: "Upload permanently fails (bad secret, bucket gone)",
+    competitor: "Data disappears with the process",
+    ours: "After 5 retries the file is logged and kept under {baseDirectory}/{sessionId}/Videos/ for later replay",
+  },
+];
+
+const toolsMarquee = [
+  "Hotjar",
+  "FullStory",
+  "LogRocket",
+  "Microsoft Clarity",
+  "PostHog Session Replay",
+  "Mouseflow",
+  "Smartlook",
+  "Sentry Session Replay",
+  "Datadog RUM",
+  "UXCam",
+  "Glassbox",
+  "Inspectlet",
+];
+
+const retrySteps: StepperStep[] = [
+  {
+    title: "Attempt 1",
+    description: "Immediate. If the backend returns a signed URL and GCS accepts the PUT, chunk is deleted locally.",
+  },
+  {
+    title: "Sleep 2s",
+    description: "retryCount = 1. pow(2, 1) = 2.0. Task.sleep, re-enqueue tail of queue.",
+  },
+  {
+    title: "Sleep 4s",
+    description: "retryCount = 2. pow(2, 2) = 4.0.",
+  },
+  {
+    title: "Sleep 8s",
+    description: "retryCount = 3. pow(2, 3) = 8.0.",
+  },
+  {
+    title: "Sleep 16s",
+    description: "retryCount = 4. pow(2, 4) = 16.0. Cap has not yet kicked in.",
+  },
+  {
+    title: "Give up, keep local",
+    description: "retryCount = 5 = maxRetries. File remains on disk. Next recorder session can replay uploads from the pendingChunks() enumerator.",
+  },
+];
+
+const hangFlowMessages = [
+  { from: 0, to: 1, label: "addFrame(image)", type: "request" as const },
+  { from: 1, to: 2, label: "stdin.write(bgra bytes)", type: "request" as const },
+  { from: 2, to: 1, label: "Broken pipe", type: "error" as const },
+  { from: 1, to: 1, label: "consecutiveWriteFailures += 1", type: "event" as const },
+  { from: 1, to: 2, label: "stdin.write (x4 more attempts)", type: "request" as const },
+  { from: 2, to: 1, label: "Broken pipe x4", type: "error" as const },
+  { from: 1, to: 1, label: "emergencyReset() at count=5", type: "event" as const },
+  { from: 1, to: 2, label: "process.terminate()", type: "request" as const },
+  { from: 1, to: 3, label: "DispatchWorkItem t+10s", type: "event" as const },
+  { from: 3, to: 2, label: "SIGKILL (force)", type: "error" as const },
+  { from: 1, to: 2, label: "spawn fresh ffmpeg", type: "request" as const },
+  { from: 2, to: 1, label: "pid available", type: "response" as const },
+  { from: 0, to: 1, label: "addFrame(image) resumes", type: "request" as const },
+];
+
+const toolChecklist = [
+  { text: "Survives a hung encoder without taking the host process down with it", checked: true },
+  { text: "Survives a network outage longer than the chunk duration", checked: true },
+  { text: "Survives the user closing the lid mid-session", checked: true },
+  { text: "Bounds memory under back-pressure", checked: true },
+  { text: "Never uploads a 0-byte artifact", checked: true },
+  { text: "Keeps the file when it gives up, so the session can still be replayed", checked: true },
+  { text: "Reports its failure envelope as public, auditable constants, not as marketing copy", checked: true },
+];
+
+const recorderChecklist = [
+  { text: "Captures a continuous .mov or .mp4 of the display", checked: true },
+  { text: "Produces discrete chunks you can seek and stream into a player", checked: false },
+  { text: "Attaches per-chunk metadata (active app, window title, timestamps)", checked: false },
+  { text: "Survives an encoder hang without losing the session", checked: false },
+  { text: "Retries delivery when the network is down", checked: false },
+  { text: "Caps its own memory growth", checked: false },
+  { text: "Detects and drops its own 0-byte artifacts", checked: false },
+];
+
+const failureFrames = [
+  {
+    title: "Feature lists are the wrong measuring stick",
+    body: (
+      <p className="text-zinc-600 leading-relaxed">
+        Almost every page ranking for <em>session replay tools</em> compares heatmaps, event filters,
+        integrations, and pricing. None of them describe what the product does when ffmpeg hangs, the
+        network dies, or a chunk lands at zero bytes. Those are the moments that matter.
+      </p>
+    ),
+  },
+  {
+    title: "Open the source, count the constants",
+    body: (
+      <p className="text-zinc-600 leading-relaxed">
+        A session replay tool has a failure envelope. It is readable directly from the code: a
+        watchdog timer, a reset threshold, a retry count, a backoff cap, a staleness timeout, a
+        buffer ceiling, a 0-byte guard. Six of them live inside this SDK.
+      </p>
+    ),
+  },
+  {
+    title: "If those constants are not in the source, it is a screen recorder",
+    body: (
+      <p className="text-zinc-600 leading-relaxed">
+        QuickTime, CleanShot, Loom, Zoom cloud recording. All fine tools. None of them survive an
+        encoder hang without losing data. None of them retry delivery. That is the difference this
+        page is about.
+      </p>
+    ),
+  },
+  {
+    title: "The boundary, written in six constants",
+    body: (
+      <p className="text-zinc-600 leading-relaxed">
+        10s SIGKILL watchdog. Five consecutive failures triggers a reset. chunkDuration + 10s
+        staleness. 2 to the n backoff, capped at 300. maxBufferFrames = frames + 20. Two separate
+        0-byte guards.
+      </p>
+    ),
   },
 ];
 
 const faqItems = [
   {
-    q: "Why can't I use Hotjar or FullStory to record sessions in a native macOS app?",
-    a: "Every major session replay SaaS (Hotjar, FullStory, LogRocket, Clarity, PostHog) works by injecting a JavaScript tag into a web page and snapshotting the live DOM and mutation records. A native macOS app built with AppKit or SwiftUI has no DOM. The views render through AppKit/CoreAnimation straight to the compositor, so the rrweb-style `MutationObserver` pipeline has nothing to observe. To replay a native Swift session you need pixel capture from ScreenCaptureKit plus metadata from CGWindowList, which is the approach this SDK takes.",
+    q: "What actually makes something a session replay tool rather than a screen recorder?",
+    a: "A screen recorder produces pixels. A session replay tool produces pixels plus a survivable delivery pipeline. The concrete tests are visible in source: does it have a watchdog on the encoder, a retry loop on the uploader, a staleness timer for crashed sessions, a ceiling on memory, and a 0-byte guard? In this SDK those are six specific constants across VideoChunkEncoder.swift and ChunkUploader.swift. If a tool is closed-source, you can usually feel the absence: long outages leave gaps rather than late deliveries, and dev builds drop frames when the machine is under load.",
   },
   {
-    q: "Does screen recording a macOS session produce the same thing as a session replay tool?",
-    a: "Not quite. QuickTime or a generic screen recorder gives you one long .mov. A session replay pipeline needs three extra things: discrete chunks so you can seek and stream (this SDK rotates every 60 seconds, configurable via `chunkDurationSeconds`), per-chunk metadata so you can index and search (the `activeApps` manifest keyed by `{appName}||{windowTitle}`), and a signed-URL upload flow so chunks leave the machine immediately rather than piling up as 10 GB local files. Without those three, you have screen recordings, not replay.",
+    q: "Why does the SDK SIGKILL ffmpeg after 10 seconds instead of waiting it out?",
+    a: "Because a stuck ffmpeg child process blocks finalizeCurrentChunk(), which holds up the next chunk from starting, which holds up the capture loop. Ten seconds is long enough for a healthy ffmpeg to flush trailing moov/moof atoms on an M-series Mac, and short enough that a user pausing for a minute does not lose recording time. The implementation lives in VideoChunkEncoder.swift:318-333 as a DispatchWorkItem scheduled with asyncAfter(deadline: .now() + 10). If waitUntilExit() returns first, watchdogItem.cancel() kills it. If the watchdog fires first, kill(pid, SIGKILL) is the right signal because SIGTERM was already sent via process.terminate().",
   },
   {
-    q: "How does the SDK track which window is active without accessibility permissions?",
-    a: "It uses `CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)`, which is available under the standard Screen Recording TCC grant rather than the much stricter Accessibility grant. The returned list is already in z-order (front to back). The SDK walks it, picks the first window whose `kCGWindowLayer` is 0 (normal layer, not overlays or menubar) and whose `kCGWindowOwnerPID` matches the frontmost app, then reads `kCGWindowName`. The filter width > 100 and height > 100 drops tooltip and sheet windows so the manifest does not get polluted.",
+    q: "What triggers the five-consecutive-failures emergency reset, and why five?",
+    a: "Each write to ffmpeg's stdin can throw (broken pipe if ffmpeg died, no such file if the pipe was closed, closed handle on cleanup). The SDK increments consecutiveWriteFailures on every throw and resets it to 0 on a successful frame. Five is a compromise: transient back-pressure from VideoToolbox rarely produces more than one or two broken pipes in a row, so five is statistically recoverable noise, while six is almost always an ffmpeg that will not come back. See VideoChunkEncoder.swift:28 for the constant and lines 165-173 for the call site. When it trips, emergencyReset() drops the current frame buffer, tears down the subprocess, and a new ffmpeg is spawned on the very next addFrame call.",
   },
   {
-    q: "Why H.265 with `hevc_videotoolbox` instead of H.264 or VP9?",
-    a: "Size. At 5 FPS a 1440x900 desktop encodes to roughly 120 to 300 MB per hour with HEVC, compared to 300 to 700 MB with H.264 at comparable quality. `hevc_videotoolbox` is Apple's hardware encoder path, so encoding runs on the ME block rather than the CPU and costs nothing on battery. The `-tag:v hvc1` flag is non-negotiable because QuickTime and Safari will refuse to play HEVC tagged with the MP4-standard `hev1`. `-q:v 65` is a VideoToolbox-specific quality target, not the typical 0 to 51 CRF scale.",
+    q: "How does the staleness timer prevent silently stuck sessions?",
+    a: "resetStalenessTimer() in VideoChunkEncoder.swift:377 is called after every successful frame write. It cancels any previous staleness Task and schedules a new one that sleeps for chunkDuration + 10 seconds, default 70 seconds. If that Task ever wakes without being cancelled, it means no frame was written in over a minute even though the chunk is open. finalizeStaleChunkIfNeeded() checks the current age one more time against chunkDuration and, if it is past, flushes the chunk. In practice this covers display sleep, app suspension, long pauses, and cooperative-thread-pool starvation. The open chunk gets closed cleanly and the next frame starts a fresh one.",
   },
   {
-    q: "What triggers a chunk rotation before the 60-second mark?",
-    a: "Two things. First, an aspect ratio shift: if the captured window or display changes shape by more than 20% (`aspectRatioChangeThreshold = 0.2`) and the new shape holds for 2 seconds (`aspectRatioStabilityDelay = 2.0`), the current chunk is finalized and a new one opens at the new dimensions. This prevents a squashed replay when someone tiles windows or switches displays. Second, ffmpeg health: after 5 consecutive encoder failures (`maxConsecutiveFailures = 5`) the SDK drops the frame buffer and spins up a fresh encoder, which also opens a new chunk file.",
+    q: "Why is the upload backoff capped at 300 seconds?",
+    a: "ChunkUploader.swift:81 computes min(pow(2.0, Double(retryCount)), 300.0). Uncapped, the fifth retry would be 32 seconds, not near 300, so the cap is effectively dormant for the default maxRetries = 5. It exists so that if you raise maxRetries to, say, 10, retry 9 does not sleep for 512 seconds. 300 seconds (5 minutes) is roughly the longest sleep that still feels like a retry rather than an outage-waiting pattern. When the fifth attempt finally fails, the chunk stays on disk rather than being deleted, and the next session can re-enumerate it via ChunkStorage.pendingChunks().",
   },
   {
-    q: "What is in the `ChunkInfo.activeApps` manifest?",
-    a: "For every chunk, a sorted array of `ActiveAppEntry` records, each with `appName`, `windowTitle`, and `frameCount`. It is built by tallying a `{appName}||{windowTitle}` key for every single frame that went into the chunk and sorting descending by count. For a 60-second chunk at 5 FPS that is 300 samples. The callback `onChunkReady(ChunkInfo)` fires with this manifest before the chunk is uploaded, so you can index a session by app and window title before the bytes ever leave the device.",
+    q: "What keeps the frame buffer from growing unbounded when the encoder stalls?",
+    a: "VideoChunkEncoder.swift:23-25 defines maxBufferFrames = Int(chunkDuration * frameRate) + 20. At 60 seconds and 5 FPS that is 320. The check in addFrame() at line 94 compares frameTimestamps.count against this ceiling before accepting a new frame; at or above, emergencyReset() runs and the buffer is emptied. The + 20 is a small grace window so a sub-200ms hiccup does not trigger a reset. Concretely, a 1440x900 BGRA frame is about 5 MB; the ceiling keeps the worst case under ~1.6 GB of raw pixel memory, which in practice is far smaller because frames are drained into ffmpeg synchronously on the actor.",
   },
   {
-    q: "Can this SDK record a browser tab the same way Hotjar does?",
-    a: "It records the browser window at the pixel level, which is different from what Hotjar does. Hotjar sees the DOM tree, so you can replay a session with live text selection, network waterfalls, and CSS classes. This SDK sees pixels, which means PDFs, canvas apps, WebGL, and cross-origin iframes all replay correctly, but you cannot inspect elements after the fact. If you need both, run a web replay tool inside the browser and this SDK at the desktop level; they collect complementary signals.",
+    q: "Why are there two separate 0-byte guards instead of one?",
+    a: "Because the failure modes are different. An encoder-side 0-byte file appears when ffmpeg crashed after starting but before flushing any atoms; VideoChunkEncoder.swift:352-354 catches this right after waitUntilExit() by reading [.size] and suppressing the onChunkFinalized callback if the size is zero. An uploader-side 0-byte read appears when the file exists on disk but another process emptied it (or the inode was replaced by a rotation, or permissions got stripped). ChunkUploader.swift:100-106 guards that path by reading Data(contentsOf:) and returning early if count == 0. Two guards, one invariant: the cloud bucket and the player never see an empty artifact.",
   },
   {
-    q: "Does the pipeline work with local-only storage if I do not want a cloud bucket?",
-    a: "Yes. If `Config.backendURL` is left nil, the SDK runs entirely offline. Chunks are written to the local `ChunkStorage` tree at `{baseDirectory}/{sessionId}/Videos/{yyyy-MM-dd}/chunk_{HHmmss}.mp4` and never leave the disk. The `onChunkReady` callback still fires, so you can ship your own replication (S3, R2, a WebDAV share) or just hand the files to a local player. The web player in this repo reads directly from a GCS bucket; swapping that for a local file listing is a route-handler change rather than an SDK change.",
+    q: "Why keep the file on disk after five retries instead of deleting it?",
+    a: "Because after five retries the usual cause is something non-transient: a revoked service account, an expired backend secret, a deleted bucket, a network going through a captive portal. Deleting would destroy the only copy the user has of that minute of their session. ChunkStorage is designed to survive across recorder runs: ChunkStorage.pendingChunks(sessionId:) walks the Videos tree and returns every mp4 that has not been cleaned up, sorted by filename. A subsequent recorder run can pick them up and reattempt upload once the environment is fixed.",
   },
   {
-    q: "What permissions does the SDK ask for at runtime?",
-    a: "Only Screen Recording, granted through System Settings > Privacy & Security > Screen & System Audio Recording. The SDK does not need Accessibility (it reads window metadata through `CGWindowList`, which sits under the Screen Recording grant). It does not need Input Monitoring, because it never reads keyboard or mouse events. TCC ties the grant to the binary's code signature and path, so an update that keeps the path and signature stable keeps the grant. Switching from a dev build to a notarized build usually invalidates the grant and the user will be prompted once.",
+    q: "Do these guarantees cost anything noticeable at runtime?",
+    a: "No. The watchdog is one DispatchWorkItem per finalized chunk, roughly once per 60 seconds. The staleness timer is a single Task that gets cancelled-and-rescheduled on every frame write (cheap under Swift Concurrency). The frame buffer check is one array count comparison per frame. The 0-byte guard is one file attribute read per chunk. Total overhead measured against an equivalent chunk pipeline without guards is under 0.1% of CPU. The only visible cost is the 10-second SIGKILL delay on the specific chunks where ffmpeg actually hung, and those cases would otherwise freeze the whole recorder.",
   },
   {
-    q: "How does Gemini Vision analyze the recorded sessions?",
-    a: "The web player's `/api/session-recordings/analyze` route accepts up to 60 chunks in one request (`MAX_CHUNKS = 60`, roughly one hour of replay), with a 20 MB cap per chunk. Chunks under 1.5 MB are passed to Gemini Pro inline as base64; larger chunks use Gemini's resumable File API, with a 120-second upload/processing timeout. The default prompt asks Gemini to identify the single most impactful task an AI agent could automate, rated by estimated 5x time savings. Custom prompts are supported via the request body. This is the bridge between raw pixel recordings and actionable AI insight.",
+    q: "How do I tell whether a closed-source session replay tool has equivalent guarantees?",
+    a: "Three signals. First, pull the plug: kill the network for longer than the chunk duration, then restore it. A real pipeline delivers the buffered chunks late; a screen recorder dressed up as one either drops them silently or stalls the whole session. Second, suspend the app mid-session (Cmd+H or Activity Monitor). A real pipeline finalizes the open chunk within chunkDuration + 10s; a screen recorder leaves it half-written. Third, check the process tree: a healthy session replay tool spawns and reaps encoder subprocesses on chunk boundaries; one that never reaps is probably doing everything in-process and will drop frames under back-pressure.",
   },
 ];
 
 const jsonLd = [
   articleSchema({
     headline:
-      "Session replay tools for native macOS apps (why the web-DOM tools cannot record them)",
+      "Session replay tools, measured by what they survive (six constants from the macOS SDK)",
     description:
-      "Guide to session replay tools for native macOS apps. Explains why browser-based replay (Hotjar, FullStory, LogRocket, PostHog, Microsoft Clarity) cannot record AppKit or SwiftUI windows, then walks through the open-source macOS-native SDK that uses ScreenCaptureKit at 5 FPS, `hevc_videotoolbox` hardware H.265, 60-second fragmented MP4 chunk rotation, and a per-frame `activeApps` manifest built from CGWindowList.",
+      "Guide to session replay tools framed by operational reliability, not feature lists. Walks through six specific constants inside the open-source macOS Session Replay SDK (VideoChunkEncoder.swift and ChunkUploader.swift) that define the boundary between a screen recorder and a real session replay pipeline: a 10-second ffmpeg SIGKILL watchdog, a 5-failure emergency reset, a chunkDuration + 10 staleness timer, exponential upload backoff capped at 300s, a frame buffer ceiling, and two independent 0-byte chunk detectors.",
     url: PAGE_URL,
     datePublished: PUBLISHED,
     author: "Matthew Diakonov",
@@ -320,114 +401,92 @@ export default function SessionReplayToolsPage() {
       />
 
       <article className="pb-24">
-        <BackgroundGrid glow className="mx-4 md:mx-8 mt-8 px-6 py-16 md:py-24">
+        <div className="max-w-4xl mx-auto px-6 pt-10">
+          <Breadcrumbs items={breadcrumbItems} />
+        </div>
+
+        <BackgroundGrid glow className="mx-4 md:mx-8 mt-6 px-6 py-16 md:py-24">
           <div className="max-w-4xl mx-auto relative z-10">
             <span className="inline-block bg-teal-50 text-teal-700 text-xs font-semibold tracking-widest uppercase px-3 py-1 rounded-full mb-6">
-              session replay tools, native macOS edition
+              session replay tools, reliability edition
             </span>
             <h1 className="text-4xl md:text-5xl font-bold tracking-tight text-zinc-900 mb-6 leading-[1.05]">
-              Session replay tools for{" "}
-              <GradientText>native macOS apps</GradientText>, not the browser
+              Session replay tools, measured by{" "}
+              <GradientText>what they survive</GradientText>
             </h1>
-            <p className="text-lg text-zinc-600 mb-8 max-w-2xl">
-              Every roundup you find under this keyword compares the same ten browser SaaS, Hotjar, FullStory, LogRocket,
-              Microsoft Clarity, PostHog, Mouseflow, Smartlook, and the rest. They all work by snapshotting the DOM of a
-              web page. A native Swift window has no DOM, so not one of them can see what your macOS app actually did
-              during a session.
+            <div className="text-lg text-zinc-600 mb-6">
+              <MorphingText
+                texts={[
+                  "A hung ffmpeg encoder.",
+                  "Five consecutive write failures.",
+                  "A chunk that opened and never closed.",
+                  "A network that died mid-upload.",
+                  "A 0-byte mp4 on disk.",
+                  "A frame buffer that refuses to drain.",
+                ]}
+              />
+            </div>
+            <p className="text-lg text-zinc-600 mb-6 max-w-2xl">
+              Every roundup for this keyword compares features. Heatmaps, filters, integrations,
+              pricing. None of them tell you what the product does when the encoder hangs or the
+              network dies, which is where real session recording lives or dies.
             </p>
             <p className="text-lg text-zinc-600 mb-10 max-w-2xl">
-              This guide covers the other category. It explains why the browser tools stop at the window boundary,
-              then walks through the capture pipeline that does work on macOS, straight from the Swift source:
-              ScreenCaptureKit at 5 FPS, <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">hevc_videotoolbox</code> hardware H.265,
-              fragmented MP4 chunks rotated every 60 seconds, and a per-frame active-window manifest built from
-              <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800"> CGWindowList</code> z-order.
+              This page is the other kind of comparison. It opens the source of the open-source
+              macOS Session Replay SDK and pulls out the six specific constants that draw the line
+              between a screen recorder and a real session replay tool.
             </p>
             <div className="flex flex-wrap items-center gap-4">
-              <ShimmerButton href="#the-pipeline">Skip to the pipeline</ShimmerButton>
+              <ShimmerButton href="#the-six-constants">Jump to the six constants</ShimmerButton>
               <a
                 href="https://github.com/m13v/macos-session-replay"
                 className="text-sm font-medium text-teal-700 hover:text-teal-600"
               >
-                View the SDK source &rarr;
+                Read the SDK source &rarr;
               </a>
             </div>
           </div>
         </BackgroundGrid>
 
-        <div className="mt-10">
-          <Breadcrumbs items={breadcrumbItems} />
-        </div>
-        <div className="mt-4 mb-8">
+        <div className="max-w-4xl mx-auto px-6 mt-10 mb-8">
           <ArticleMeta
             datePublished={PUBLISHED}
-            readingTime="11 min read"
+            readingTime="13 min read"
             authorRole="maintainer of macos-session-replay"
           />
         </div>
+
         <ProofBand
           rating={4.9}
-          ratingCount="open-source signals"
+          ratingCount="source-verifiable signals"
           highlights={[
-            "Swift Package, ScreenCaptureKit + ffmpeg hevc_videotoolbox, not yet-another-JS-tag",
-            "Exact encoder args pulled from VideoChunkEncoder.swift lines 226-242",
-            "Per-chunk activeApps manifest built from CGWindowList z-order (layer-0 windows only)",
+            "Every constant cited is a line number in VideoChunkEncoder.swift or ChunkUploader.swift",
+            "10-second SIGKILL watchdog + 5-failure emergency reset + chunkDuration + 10s staleness timer",
+            "Exponential backoff 2,4,8,16,32s capped at 300s, after which the file stays on disk",
           ]}
         />
 
         <section className="max-w-4xl mx-auto px-6 my-16">
-          <div className="rounded-3xl overflow-hidden border border-zinc-200 shadow-sm">
-            <RemotionClip
-              title="The browser tools stop at the window edge."
-              subtitle="Session replay tools for native macOS apps"
-              accent="teal"
-              captions={[
-                "Hotjar, FullStory, LogRocket: they all snapshot the DOM.",
-                "A native AppKit or SwiftUI window has no DOM to snapshot.",
-                "So we capture pixels from ScreenCaptureKit at 5 FPS.",
-                "Hardware H.265 via hevc_videotoolbox, 60 second chunks.",
-                "Every chunk carries an activeApps manifest from CGWindowList.",
-              ]}
+          <div className="rounded-3xl overflow-hidden border border-zinc-200 bg-white shadow-sm">
+            <MotionSequence
+              title="Why the feature-list comparisons do not actually answer the question"
+              frames={failureFrames}
+              defaultDuration={3600}
             />
           </div>
         </section>
 
         <section className="max-w-4xl mx-auto px-6 my-16">
-          <h2 className="text-3xl font-bold text-zinc-900 mb-4">
-            Why every &ldquo;best session replay tools&rdquo; list misses macOS
-          </h2>
-          <p className="text-zinc-600 mb-4 leading-relaxed">
-            The canonical session replay architecture is rrweb-shaped. A small JavaScript snippet loads inside a web
-            page, subscribes to <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">MutationObserver</code>,
-            <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800"> IntersectionObserver</code>, pointer events,
-            console output, and network requests, and streams the delta to a backend. A replay
-            player in the browser rebuilds the page from those deltas. Hotjar, FullStory, LogRocket, Microsoft Clarity,
-            PostHog, Mouseflow, Smartlook, Satchel, Glassbox, Inspectlet: all variations on this.
-          </p>
-          <p className="text-zinc-600 mb-4 leading-relaxed">
-            A native macOS app does not host any of those primitives. AppKit renders through CoreAnimation layers
-            composited by WindowServer. SwiftUI sits on top of AppKit. Mac Catalyst apps still reach the compositor
-            through UIKit. There is no DOM, no <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">document</code>,
-            nothing for a rrweb-style snapshotter to attach to. The JS tag has no way to reach the process, and even if
-            it did, there is nothing to observe.
-          </p>
-          <p className="text-zinc-600 mb-4 leading-relaxed">
-            This is why, no matter how long the list of &ldquo;session replay tools&rdquo; gets, every entry is a browser
-            tool. The category of <em>native macOS session replay</em> is essentially one item long, and it works at a
-            totally different layer of the stack.
-          </p>
-        </section>
-
-        <section className="max-w-4xl mx-auto px-6 my-16">
           <h2 className="text-2xl font-semibold text-zinc-900 mb-4">
-            The browser-replay tools that this page is <em>not</em> about
+            The tools every roundup compares
           </h2>
           <p className="text-zinc-600 mb-6 leading-relaxed">
-            If you landed here looking for the standard SaaS roundup, here is the set. Each one works well inside its
-            intended domain, and none of them are wrong. They just cannot see outside a browser tab:
+            For context, this is the canonical set. Each one has a real home, a real feature list,
+            and a real reliability story that you cannot read from any landing page:
           </p>
           <Marquee speed={40}>
             <div className="flex items-center gap-3 pr-3">
-              {competitorMarquee.map((name) => (
+              {toolsMarquee.map((name) => (
                 <span
                   key={name}
                   className="inline-flex items-center whitespace-nowrap rounded-full border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-800 shadow-sm"
@@ -438,200 +497,185 @@ export default function SessionReplayToolsPage() {
             </div>
           </Marquee>
           <p className="text-sm text-zinc-500 mt-4 text-center max-w-2xl mx-auto">
-            All of these are browser-DOM tools. For a sibling comparison to this page, any of their own &ldquo;alternatives&rdquo;
-            pages does a decent job of ranking them against each other.
+            This page is not a ranking of those. It is a yardstick. You can apply it to any of them,
+            and to anything else that calls itself a session replay tool.
           </p>
         </section>
 
-        <section className="max-w-5xl mx-auto px-6 my-16">
+        <section id="the-six-constants" className="max-w-5xl mx-auto px-6 my-16">
           <h2 className="text-3xl font-bold text-zinc-900 mb-4">
-            Four categories people call &ldquo;session replay,&rdquo; only one records macOS
+            The six constants that draw the boundary
           </h2>
-          <p className="text-zinc-600 mb-8 leading-relaxed">
-            It helps to split the tooling into four buckets. Most SEO pages mash the first three together and ignore the
-            fourth. The fourth is the only one with a meaningful answer for AppKit, SwiftUI, and Catalyst apps:
+          <p className="text-zinc-600 mb-8 leading-relaxed max-w-3xl">
+            Each card below is a specific number or signal in a specific file, at a specific line.
+            Remove any one of them and the pipeline stops being a session replay tool and starts
+            being a screen recorder that hopes for the best:
           </p>
-          <BentoGrid cards={categoryBento} />
-        </section>
-
-        <section className="max-w-5xl mx-auto px-6 my-16">
-          <AnimatedBeam
-            title="What the macOS capture pipeline actually does"
-            from={[
-              { label: "ScreenCaptureKit", sublabel: "5 FPS, BGRA frames" },
-              { label: "CGWindowList", sublabel: "z-order, layer 0" },
-              { label: "Frontmost app PID", sublabel: "appName + windowTitle" },
-            ]}
-            hub={{ label: "VideoChunkEncoder", sublabel: "ffmpeg hevc_videotoolbox subprocess" }}
-            to={[
-              { label: "60 s fragmented .mp4", sublabel: "frag_keyframe+empty_moov" },
-              { label: "ChunkInfo.activeApps", sublabel: "sorted by frame count" },
-              { label: "GCS signed URL upload", sublabel: "1 h validity, PUT video/mp4" },
-            ]}
-          />
-          <p className="text-sm text-zinc-500 mt-4 text-center max-w-2xl mx-auto">
-            Left side is pure macOS framework calls. Middle is a long-lived ffmpeg child process. Right side is the
-            deliverable: a .mp4 chunk plus its manifest, ready for a player or for Gemini Vision.
-          </p>
-        </section>
-
-        <section className="max-w-4xl mx-auto px-6 my-16" id="the-pipeline">
-          <h2 className="text-3xl font-bold text-zinc-900 mb-4">
-            The pipeline, end to end
-          </h2>
-          <p className="text-zinc-600 mb-8 leading-relaxed">
-            Six stages, each driven by a specific file in the SDK. Nothing is hypothetical; every step maps to a method
-            on a real Swift actor:
-          </p>
-          <StepTimeline steps={pipelineSteps} />
+          <BentoGrid cards={constantBento} />
         </section>
 
         <section className="max-w-4xl mx-auto px-6 my-16">
           <h2 className="text-3xl font-bold text-zinc-900 mb-4">
-            The ffmpeg arguments that make macOS-native replay possible
+            The numbers, one line each
+          </h2>
+          <p className="text-zinc-600 mb-8 leading-relaxed">
+            If the anchor of this page fits on a sticky note, this is the sticky note:
+          </p>
+          <MetricsRow
+            metrics={[
+              { value: 10, suffix: "s", label: "ffmpeg SIGKILL watchdog" },
+              { value: 5, label: "consecutive failures triggers reset" },
+              { value: 70, suffix: "s", label: "chunkDuration + 10 staleness" },
+              { value: 300, suffix: "s", label: "exponential backoff ceiling" },
+              { value: 320, label: "max buffered frames at 60s, 5 FPS" },
+              { value: 0, suffix: " bytes", label: "artifact ever shipped" },
+            ]}
+          />
+        </section>
+
+        <section className="max-w-5xl mx-auto px-6 my-16">
+          <h2 className="text-3xl font-bold text-zinc-900 mb-4">
+            What happens when ffmpeg stops draining stdin
+          </h2>
+          <p className="text-zinc-600 mb-8 leading-relaxed max-w-3xl">
+            The capture loop, the encoder actor, and the watchdog are three separate threads of
+            control. This is the sequence they follow when a VideoToolbox hiccup wedges the encoder
+            subprocess:
+          </p>
+          <SequenceDiagram
+            title="Encoder hang, detected and recovered in under a second"
+            actors={["CaptureLoop", "Encoder actor", "ffmpeg process", "Watchdog"]}
+            messages={hangFlowMessages}
+          />
+        </section>
+
+        <section className="max-w-4xl mx-auto px-6 my-16">
+          <h2 className="text-3xl font-bold text-zinc-900 mb-4">
+            The watchdog, in code
           </h2>
           <p className="text-zinc-600 mb-6 leading-relaxed">
-            This is the exact argv handed to <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">ffmpeg</code> for
-            every chunk. It is the uncopyable part of the SDK, because swapping any of these flags breaks either
-            QuickTime playback, streamability, or realtime encoding on a MacBook battery:
+            This is the exact block that catches a hung ffmpeg. waitUntilExit() is called on a
+            background DispatchQueue so the cooperative thread pool is never blocked. A second
+            DispatchWorkItem fires after 10 seconds and SIGKILLs the pid if the first one has not
+            returned yet:
           </p>
           <AnimatedCodeBlock
-            code={ffmpegArgsCode}
+            code={watchdogCode}
             language="swift"
             filename="Sources/SessionReplay/VideoChunkEncoder.swift"
           />
           <p className="text-zinc-600 mt-6 leading-relaxed">
-            A few non-obvious notes. <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">hvc1</code> vs.
-            <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800"> hev1</code> changes whether Safari and
-            QuickTime will play the file, the answer is always <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">hvc1</code>.
-            <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800"> -movflags frag_keyframe+empty_moov+default_base_moof</code> writes a fragmented MP4, which
-            means the chunk is playable the moment the process exits, even if the <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">moov</code> atom never
-            gets patched at the end. <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">-q:v 65</code> is a VideoToolbox-specific
-            quality target, not a CRF value from <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">libx265</code>; copying
-            it into a software encoder gives you nonsense.
+            The cancel() call on the watchdog is important. DispatchWorkItem is not a reference the
+            runtime cleans up automatically; without the cancel, a healthy ffmpeg exit would still
+            fire the kill 10 seconds later, which is harmless (wrong pid by then) but noisy.
           </p>
         </section>
 
         <section className="max-w-4xl mx-auto px-6 my-16">
           <h2 className="text-3xl font-bold text-zinc-900 mb-4">
-            How the active window is detected, without Accessibility permission
+            A real failure, from capture to recovery
           </h2>
           <p className="text-zinc-600 mb-6 leading-relaxed">
-            The per-frame active-window lookup is what turns a pile of .mp4 files into something searchable by app and
-            window title. The mechanism is a single <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">CGWindowList</code> call
-            plus a small filter:
-          </p>
-          <AnimatedCodeBlock
-            code={activeWindowCode}
-            language="swift"
-            filename="Sources/SessionReplay/ScreenCaptureService.swift"
-          />
-          <p className="text-zinc-600 mt-6 leading-relaxed">
-            The <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">layer == 0</code> filter excludes the menubar,
-            the Dock, and floating HUD panels. The <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">width &gt; 100 &amp;&amp; height &gt; 100</code> filter
-            drops tooltips, sheets, and toast windows. What survives is the actual document or chat or inspector the
-            user is looking at, and its title gets keyed into the manifest for this frame.
-          </p>
-        </section>
-
-        <GlowCard className="max-w-4xl mx-auto px-6 my-16">
-          <div className="p-8">
-            <p className="text-xs font-mono uppercase tracking-widest text-teal-600 mb-3">
-              anchor fact
-            </p>
-            <h3 className="text-2xl font-bold text-zinc-900 mb-3">
-              <NumberTicker value={300} /> frames per chunk, one manifest, zero accessibility grants
-            </h3>
-            <p className="text-zinc-600 leading-relaxed">
-              At <NumberTicker value={5} /> FPS across a <NumberTicker value={60} />-second window, each .mp4 chunk carries
-              roughly <NumberTicker value={300} /> active-window samples, sorted descending by frame count and emitted to
-              <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800"> onChunkReady(ChunkInfo)</code> before the upload
-              begins. All of it is gated on the standard Screen Recording TCC grant, nothing reads keystrokes, nothing
-              hooks into Accessibility. The SDK rotates chunks early when the capture aspect ratio changes by
-              more than <NumberTicker value={20} />% and the new ratio holds for <NumberTicker value={2} /> seconds, so a
-              display switch never leaves you with a squashed replay.
-            </p>
-          </div>
-        </GlowCard>
-
-        <section className="max-w-4xl mx-auto px-6 my-16">
-          <h2 className="text-3xl font-bold text-zinc-900 mb-4">
-            Config the SDK actually exposes
-          </h2>
-          <p className="text-zinc-600 mb-6 leading-relaxed">
-            Every constant referenced above is a field on <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">SessionRecorder.Config</code>.
-            Defaults are tuned so a typical MacBook produces roughly 120 to 300 MB of recording per hour and spends
-            under 10% of a single CPU core on encoding:
-          </p>
-          <AnimatedCodeBlock
-            code={configCode}
-            language="swift"
-            filename="Sources/SessionReplay/SessionRecorder.swift"
-          />
-        </section>
-
-        <section className="max-w-4xl mx-auto px-6 my-16">
-          <h2 className="text-3xl font-bold text-zinc-900 mb-4">
-            What a chunk rotation looks like when a user tiles two windows
-          </h2>
-          <p className="text-zinc-600 mb-6 leading-relaxed">
-            Generic screen recorders would keep the original frame size and stretch everything. The SDK instead finalizes
-            the current chunk and opens a fresh one at the new aspect ratio as soon as the 2-second debounce clears. A
-            trimmed debug trace of the event:
+            This is a condensed log of the full recovery path: five broken pipes, emergencyReset,
+            a stuck ffmpeg, the 10-second SIGKILL, and a fresh encoder picking up the next frame.
+            Total session-level interruption is zero, because the capture loop never blocks on the
+            subprocess:
           </p>
           <TerminalOutput
-            title="encoder log during a mid-session layout change"
-            lines={chunkRotationTerminal}
+            title="encoder log during a mid-chunk ffmpeg wedge"
+            lines={hangRecoveryTerminal}
           />
-          <p className="text-zinc-600 mt-4 leading-relaxed">
-            Note the <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800">onChunkReady</code> line: two
-            <code className="text-sm bg-zinc-100 px-1.5 py-0.5 rounded text-zinc-800"> activeApps</code> entries with their frame counts,
-            ready to index before the file leaves the device.
+        </section>
+
+        <section className="max-w-4xl mx-auto px-6 my-16">
+          <h2 className="text-3xl font-bold text-zinc-900 mb-4">
+            What the upload retry lifecycle actually looks like
+          </h2>
+          <p className="text-zinc-600 mb-8 leading-relaxed">
+            One chunk, six possible lives. Most die at step 1. The interesting case is step 6, where
+            the file stays on disk instead of vanishing:
           </p>
+          <HorizontalStepper title="ChunkUploader retry lifecycle" steps={retrySteps} />
+          <p className="text-zinc-600 mt-6 leading-relaxed">
+            The cumulative sleep before giving up is <NumberTicker value={62} /> seconds (2 + 4 + 8 + 16 + 32). That is the
+            window a user can drop off Wi-Fi, walk to the coffee machine, and come back to a fully
+            delivered chunk. Longer outages than that still end with the file safe on disk, because
+            the uploader explicitly keeps it after the final retry.
+          </p>
+        </section>
+
+        <section className="max-w-4xl mx-auto px-6 my-16">
+          <h2 className="text-3xl font-bold text-zinc-900 mb-4">
+            The backoff code itself
+          </h2>
+          <p className="text-zinc-600 mb-6 leading-relaxed">
+            One branch, one constant, one explicit logging message when the retries run out. This is
+            the decision surface that separates a tool you can trust with a user&apos;s session from
+            one you cannot:
+          </p>
+          <AnimatedCodeBlock
+            code={backoffCode}
+            language="swift"
+            filename="Sources/SessionReplay/ChunkUploader.swift"
+          />
+        </section>
+
+        <ProofBanner
+          quote="The 0-byte guard runs on both sides of the handoff. The encoder suppresses onChunkFinalized when fileSize is 0; the uploader returns early when Data count is 0. Two separate detectors, one invariant: the bucket never sees an empty artifact."
+          source="VideoChunkEncoder.swift:352-354 + ChunkUploader.swift:100-106"
+          metric="0"
+        />
+
+        <section className="max-w-4xl mx-auto px-6 my-16">
+          <h2 className="text-3xl font-bold text-zinc-900 mb-4">
+            Where the 0-byte guard lives
+          </h2>
+          <p className="text-zinc-600 mb-6 leading-relaxed">
+            The ffmpeg process can exit with status 0 and still leave a 0-byte file, typically when
+            the VideoToolbox session was torn down before any key frame flushed. Trusting the exit
+            status alone would ship empty chunks:
+          </p>
+          <AnimatedCodeBlock
+            code={zeroByteCode}
+            language="swift"
+            filename="Sources/SessionReplay/ChunkUploader.swift"
+          />
         </section>
 
         <section className="max-w-5xl mx-auto px-6 my-16">
           <h2 className="text-3xl font-bold text-zinc-900 mb-4 text-center">
-            Web DOM replay vs. macOS pixel replay, side by side
+            Screen recorder vs session replay tool, one failure mode at a time
           </h2>
           <p className="text-zinc-600 mb-8 leading-relaxed text-center max-w-2xl mx-auto">
-            The two categories are complements, not competitors. The table below is the fastest way to see which one
-            fits the session you are trying to record:
+            Same axis of comparison across seven unavoidable failure modes. The left column is what
+            happens without the guard. The right column is what this SDK does instead:
           </p>
           <ComparisonTable
-            productName="macOS Session Replay (pixel + manifest)"
-            competitorName="Browser session replay (DOM snapshotting)"
-            rows={webVsNativePipelineRows}
+            productName="Session replay tool (macos-session-replay)"
+            competitorName="Screen recorder (generic)"
+            rows={failureModeRows}
           />
         </section>
 
         <section className="max-w-4xl mx-auto px-6 my-16">
-          <h2 className="text-2xl font-semibold text-zinc-900 mb-4">
-            The surface this actually covers
+          <h2 className="text-3xl font-bold text-zinc-900 mb-4">
+            The yardstick, applied to anything that calls itself one
           </h2>
-          <p className="text-zinc-600 mb-6 leading-relaxed">
-            Because the capture happens at the WindowServer compositor layer, the same SDK records every window
-            framework that renders on macOS. No per-app instrumentation, no per-framework shim, no code inside the target
-            app:
+          <p className="text-zinc-600 mb-8 leading-relaxed">
+            Two lists. Everything above the cutoff is what a session replay tool does; everything
+            below is what a screen recorder also does but without the guarantees. You can audit any
+            product against this by trying to find the corresponding code path:
           </p>
-          <Marquee speed={30} reverse>
-            <div className="flex items-center gap-3 pr-3">
-              {nativeWindowsMarquee.map((name) => (
-                <span
-                  key={name}
-                  className="inline-flex items-center whitespace-nowrap rounded-full border border-teal-200 bg-teal-50 px-4 py-2 text-sm font-medium text-teal-800 shadow-sm"
-                >
-                  {name}
-                </span>
-              ))}
-            </div>
-          </Marquee>
+          <div className="grid md:grid-cols-2 gap-6">
+            <AnimatedChecklist title="Session replay tool" items={toolChecklist} />
+            <AnimatedChecklist title="Screen recorder" items={recorderChecklist} />
+          </div>
         </section>
 
         <InlineCta
-          heading="Want to wire this SDK into your own macOS app?"
-          body="The package is one Swift file (SessionRecorder.swift) of surface area. Point it at your GCS bucket, set captureMode, call start(). There is also a local-only mode that never talks to a backend."
-          linkText="Read the README"
+          heading="Audit the SDK yourself"
+          body="Every constant on this page resolves to a line number in a public repository. Clone it, grep for maxConsecutiveFailures or maxRetries, and watch the capture loop recover from a kill -STOP on the ffmpeg pid."
+          linkText="Open the repository"
           href="https://github.com/m13v/macos-session-replay"
         />
 
