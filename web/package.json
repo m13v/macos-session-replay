@@ -11,10 +11,10 @@
   "dependencies": {
     "@assistant-ui/react": "^0.12.25",
     "@clerk/nextjs": "^6.36.10",
-    "@m13v/seo-components": "^0.15.0",
+    "@m13v/seo-components": "^0.16.0",
     "@neondatabase/serverless": "^1.0.2",
     "@remotion/player": "^4.0.448",
-    "@seo/components": "npm:@m13v/seo-components@^0.15.0",
+    "@seo/components": "npm:@m13v/seo-components@^0.16.0",
     "firebase-admin": "^13.6.0",
     "framer-motion": "^12.38.0",
     "lottie-react": "^2.4.1",
