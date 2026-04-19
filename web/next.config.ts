@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  transpilePackages: ["@seo/components", "@m13v/seo-components"],
 };
 
 export default nextConfig;
