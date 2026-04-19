@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@source "../../node_modules/@seo/components/src";
+
 :root {
   --background: #0a0a0a;
   --foreground: #ededed;
