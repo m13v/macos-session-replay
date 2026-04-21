@@ -2,6 +2,9 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { PostHogProvider } from "@/components/posthog-provider";
+import { HeadingAnchors, GuideChatPanel } from "@seo/components";
+import { SeoComponentsStyles } from "@seo/components/server";
+import { SiteSidebar } from "@/components/site-sidebar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -25,10 +28,18 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
+      <head>
+        <SeoComponentsStyles />
+      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <PostHogProvider>{children}</PostHogProvider>
+        <HeadingAnchors />
+        <PostHogProvider>
+          <SiteSidebar />
+          {children}
+          <GuideChatPanel />
+        </PostHogProvider>
       </body>
     </html>
   );
