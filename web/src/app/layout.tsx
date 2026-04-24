@@ -3,7 +3,6 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { PostHogProvider } from "@/components/posthog-provider";
 import { HeadingAnchors, GuideChatPanel } from "@seo/components";
-import { SeoComponentsStyles } from "@seo/components/server";
 import { SiteSidebar } from "@/components/site-sidebar";
 
 const geistSans = Geist({
@@ -28,9 +27,6 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <head>
-        <SeoComponentsStyles />
-      </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
