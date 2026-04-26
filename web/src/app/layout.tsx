@@ -32,9 +32,11 @@ export default function RootLayout({
       >
         <HeadingAnchors />
         <PostHogProvider>
-          <SiteSidebar />
-          {children}
-          <GuideChatPanel />
+          <div className="flex min-h-screen">
+            <SiteSidebar />
+            <div className="flex-1 min-w-0 flex flex-col">{children}</div>
+            <GuideChatPanel />
+          </div>
         </PostHogProvider>
       </body>
     </html>
