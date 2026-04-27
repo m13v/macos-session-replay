@@ -388,7 +388,7 @@ export default function SessionReplayToolsPage() {
           <ArticleMeta
             datePublished={PUBLISHED}
             readingTime="12 min read"
-            authorRole="maintainer of macos-session-replay"
+            authorRole="Written with AI"
           />
         </div>
 

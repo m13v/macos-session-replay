@@ -404,7 +404,7 @@ export default function WhatIsUserBehaviorAnalyticsPage() {
           <ArticleMeta
             datePublished={PUBLISHED}
             readingTime="11 min read"
-            authorRole="maintainer of macos-session-replay"
+            authorRole="Written with AI"
           />
         </div>
 
