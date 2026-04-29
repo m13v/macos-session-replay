@@ -14,7 +14,7 @@
     "@m13v/seo-components": "^0.30.4",
     "@neondatabase/serverless": "^1.0.2",
     "@remotion/player": "^4.0.448",
-    "@seo/components": "npm:@m13v/seo-components@^0.30.3",
+    "@seo/components": "npm:@m13v/seo-components@^0.30.4",
     "firebase-admin": "^13.6.0",
     "framer-motion": "^12.38.0",
     "lottie-react": "^2.4.1",
