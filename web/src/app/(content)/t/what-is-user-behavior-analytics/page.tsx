@@ -362,7 +362,7 @@ export default function WhatIsUserBehaviorAnalyticsPage() {
         dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
       />
 
-      <article className="pb-24 bg-white text-zinc-900">
+      <article className="pb-24 text-zinc-900">
         <div className="max-w-4xl mx-auto px-6 pt-10">
           <Breadcrumbs items={breadcrumbItems} />
         </div>
