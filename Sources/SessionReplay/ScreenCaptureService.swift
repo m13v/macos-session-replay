@@ -19,6 +19,37 @@ public final class ScreenCaptureService: Sendable {
         CGRequestScreenCaptureAccess()
     }
 
+    /// Render an SCKit-returned CGImage into a fresh BGRA bitmap we own and return
+    /// a new CGImage backed by that buffer. SCScreenshotManager hands back images
+    /// whose data provider points into ScreenCaptureKit's buffer pool; that pool
+    /// can recycle the underlying IOSurface before downstream consumers (encoder
+    /// running on another actor, possibly after await suspensions) read the pixels,
+    /// producing the "CGDataProviderDirectGetBytesAtPositionInternal calling
+    /// provider created with data" warning followed by a hard crash inside
+    /// CGContextDrawImage. By forcing the pixel read here, synchronously, while
+    /// the source provider is still valid, the returned image becomes safe to
+    /// pass across actor boundaries and hold for the duration of a frame.
+    private func makeStableCopy(of image: CGImage) -> CGImage? {
+        let width = image.width
+        let height = image.height
+        guard width > 0, height > 0 else { return nil }
+        let bytesPerRow = width * 4
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue
+        ) else {
+            return nil
+        }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
+    }
+
     // MARK: - Full Display Capture
 
     /// Capture the full primary display as a CGImage.
@@ -57,10 +88,11 @@ public final class ScreenCaptureService: Sendable {
             config.width = Int(configWidth)
             config.height = Int(configHeight)
 
-            return try await SCScreenshotManager.captureImage(
+            let raw = try await SCScreenshotManager.captureImage(
                 contentFilter: filter,
                 configuration: config
             )
+            return autoreleasepool { makeStableCopy(of: raw) }
         } catch {
             log("ScreenCaptureService: Capture error: \(error.localizedDescription)")
             return nil
@@ -140,10 +172,14 @@ public final class ScreenCaptureService: Sendable {
             config.width = Int(configWidth)
             config.height = Int(configHeight)
 
-            let image = try await SCScreenshotManager.captureImage(
+            let raw = try await SCScreenshotManager.captureImage(
                 contentFilter: filter,
                 configuration: config
             )
+            guard let image = autoreleasepool(invoking: { makeStableCopy(of: raw) }) else {
+                guard let fallback = await captureFullDisplay() else { return nil }
+                return CaptureResult(image: fallback, appName: appName, windowTitle: windowTitle)
+            }
             return CaptureResult(image: image, appName: appName, windowTitle: windowTitle)
         } catch {
             log("ScreenCaptureService: Active window capture error: \(error.localizedDescription)")
