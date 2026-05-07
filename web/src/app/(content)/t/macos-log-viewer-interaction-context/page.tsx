@@ -205,6 +205,8 @@ export default function Page() {
       datePublished: PUBLISHED,
       author: "Matthew Diakonov",
       authorUrl: "https://m13v.com",
+      publisherName: "macOS Session Replay",
+      publisherUrl: "https://macos-session-replay.com",
     }),
     breadcrumbListSchema(breadcrumbSchemaItems),
     faqPageSchema(faqItems),
