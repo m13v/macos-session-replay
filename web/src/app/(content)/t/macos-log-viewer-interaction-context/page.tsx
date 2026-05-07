@@ -23,7 +23,7 @@ export const metadata: Metadata = {
   title:
     "macOS log viewer interaction context: why Console.app cannot show what the user was doing",
   description:
-    "Console.app, log show, log stream, and OSLogStore all read Apple's unified logging system. That system records subsystem, category, message, and timestamp — never the screen state, focused app, or window title. This guide explains exactly what is missing, why no log viewer alone can fill the gap, and how to bridge it by joining os.Logger output with a timestamped frame stream tagged with appName and windowTitle.",
+    "Console.app, log show, log stream, and OSLogStore all read Apple's unified logging system. That system records subsystem, category, message, and timestamp, and never the screen state, focused app, or window title. This guide explains exactly what is missing, why no log viewer alone can fill the gap, and how to bridge it by joining os.Logger output with a timestamped frame stream tagged with appName and windowTitle.",
   alternates: { canonical: PAGE_URL },
   openGraph: {
     title:
@@ -38,7 +38,7 @@ export const metadata: Metadata = {
     title:
       "macOS log viewer interaction context: the timestamp join that bridges OSLog and screen state",
     description:
-      "os.Logger(subsystem: \"com.session-replay\") plus CapturedFrame(appName, windowTitle, captureTime) — joined on wall-clock time. The whole bridge is two files.",
+      "os.Logger(subsystem: \"com.session-replay\") plus CapturedFrame(appName, windowTitle, captureTime), joined on wall-clock time. The whole bridge is two files.",
   },
   robots: { index: true, follow: true },
 };
@@ -149,7 +149,7 @@ const setupSteps = [
   {
     title: "Replay the minute, not the line",
     description:
-      "When a log line says \"Capture error: The user denied screen recording access\" at 14:03:42.018, the chunk that contains 14:03:42.018 has the actual screen the user saw — the System Settings sheet they clicked Deny on, plus appName=\"System Settings\" and windowTitle=\"Privacy & Security\". The log told you what your code observed; the chunk tells you what the user did. Both are necessary; neither is sufficient.",
+      "When a log line says \"Capture error: The user denied screen recording access\" at 14:03:42.018, the chunk that contains 14:03:42.018 has the actual screen the user saw: the System Settings sheet they clicked Deny on, plus appName=\"System Settings\" and windowTitle=\"Privacy & Security\". The log told you what your code observed; the chunk tells you what the user did. Both are necessary; neither is sufficient.",
   },
 ];
 
@@ -162,7 +162,7 @@ const afterContent =
 const faqItems = [
   {
     q: "Can Console.app, log show, or log stream display user interaction context on macOS?",
-    a: "No. Console.app, log show, log stream, and OSLogStore are all surfaces over Apple's unified logging system. That system stores subsystem, category, level, message, and timestamp — and only those. The OSLog framework documentation (developer.apple.com/documentation/oslog/oslogstore) describes OSLogEntry, OSLogEntryLog, and the predicates you can run, and none of them include screen state, focused app, window title, or input events. Apple's log viewers cannot show what is not in Apple's log store.",
+    a: "No. Console.app, log show, log stream, and OSLogStore are all surfaces over Apple's unified logging system. That system stores subsystem, category, level, message, and timestamp, and only those. The OSLog framework documentation (developer.apple.com/documentation/oslog/oslogstore) describes OSLogEntry, OSLogEntryLog, and the predicates you can run, and none of them include screen state, focused app, window title, or input events. Apple's log viewers cannot show what is not in Apple's log store.",
   },
   {
     q: "What does \"interaction context\" actually mean in this context?",
@@ -170,7 +170,7 @@ const faqItems = [
   },
   {
     q: "Why does macOS unified logging deliberately exclude screen state?",
-    a: "Three reasons. First, scope: os.Logger is a structured-message bus, not a UX recorder. Second, privacy: storing focused window titles or screen contents in a system-wide log would leak data across apps that have no business reading each other's UI. Third, scale: unified logging is hot-path infrastructure used by every process on macOS; coupling it to AppKit/UIKit focus tracking would push tens of thousands of writes per second. The right architecture is exactly what Apple ships — a tiny, fast log primitive — plus an opt-in, app-scoped capture layer for everything else.",
+    a: "Three reasons. First, scope: os.Logger is a structured-message bus, not a UX recorder. Second, privacy: storing focused window titles or screen contents in a system-wide log would leak data across apps that have no business reading each other's UI. Third, scale: unified logging is hot-path infrastructure used by every process on macOS; coupling it to AppKit/UIKit focus tracking would push tens of thousands of writes per second. The right architecture is exactly what Apple ships: a tiny, fast log primitive, plus an opt-in, app-scoped capture layer for everything else.",
   },
   {
     q: "How do I bridge an os.Logger line to the screen state at that exact moment?",
@@ -185,7 +185,7 @@ const faqItems = [
     a: "Both. log stream --predicate 'subsystem == \"com.session-replay\"' --level info shows lines as they are written, and the SessionRecorder is also writing CapturedFrame metadata in memory in the same instant. The onChunkReady callback fires every chunkDurationSeconds (default 60) with the activeApps for the just-finalized minute, so the cadence is roughly: log stream is real-time, the per-frame appName/windowTitle is in memory, and the queryable 60-second activeApps histogram lags by at most one chunk duration. For asynchronous analysis, OSLogStore + the persisted chunk metadata gives you arbitrary historical joins.",
   },
   {
-    q: "What about log levels, signposts, and activities — do those help with interaction context?",
+    q: "What about log levels, signposts, and activities, do those help with interaction context?",
     a: "They help with structure inside the log itself, not with interaction context. Log levels (Default/Info/Debug/Error/Fault) sort by severity. os_signpost intervals annotate a span of code execution. Activities thread context across asynchronous boundaries. All three are valuable, all three are still inside the unified logging back end, and none of them carry a single byte about the user's screen. They make logs more useful as logs; they do not turn logs into a session replay.",
   },
   {
@@ -201,7 +201,7 @@ export default function Page() {
       headline:
         "macOS log viewer interaction context: why Console.app cannot show what the user was doing",
       description:
-        "Apple's unified logging system records subsystem, category, message, and timestamp — never the screen state, focused app, or window title. Bridge the gap by capturing screen frames on the same Date() clock and joining on timestamp.",
+        "Apple's unified logging system records subsystem, category, message, and timestamp, and never the screen state, focused app, or window title. Bridge the gap by capturing screen frames on the same Date() clock and joining on timestamp.",
       datePublished: PUBLISHED,
       author: "Matthew Diakonov",
       authorUrl: "https://m13v.com",
@@ -243,7 +243,7 @@ export default function Page() {
             Direct answer (verified 2026-05-06)
           </h2>
           <p className="mt-3 text-zinc-800 text-base leading-relaxed">
-            <strong className="text-zinc-900">Can a macOS log viewer show user interaction context? No.</strong> Apple's unified logging back end (the source for Console.app, <code className="text-teal-700 bg-white px-1 rounded text-sm">log show</code>, <code className="text-teal-700 bg-white px-1 rounded text-sm">log stream</code>, and OSLogStore) stores subsystem, category, level, message, and timestamp — and nothing about the user's screen, focused app, or window. To get interaction context, you have to capture it separately on the same wall-clock and join on timestamp.
+            <strong className="text-zinc-900">Can a macOS log viewer show user interaction context? No.</strong> Apple's unified logging back end (the source for Console.app, <code className="text-teal-700 bg-white px-1 rounded text-sm">log show</code>, <code className="text-teal-700 bg-white px-1 rounded text-sm">log stream</code>, and OSLogStore) stores subsystem, category, level, message, and timestamp, and nothing about the user's screen, focused app, or window. To get interaction context, you have to capture it separately on the same wall-clock and join on timestamp.
           </p>
           <p className="mt-2 text-sm text-zinc-600">
             Verified against Apple's OSLog reference at{" "}
@@ -260,10 +260,10 @@ export default function Page() {
         <section className="mt-12">
           <h2 className="text-2xl font-semibold text-zinc-900">What you can actually see in a macOS log viewer</h2>
           <p className="mt-3 text-zinc-700 leading-relaxed">
-            Run a real query against this SDK's logs while a session is recording. The output below is what every macOS log viewer on the system can show you — Console.app's GUI, the streaming CLI, the persisted store, all of them. Watch the right-hand column.
+            Run a real query against this SDK's logs while a session is recording. The output below is what every macOS log viewer on the system can show you: Console.app's GUI, the streaming CLI, the persisted store, all of them. Watch the right-hand column.
           </p>
           <div className="mt-6">
-            <TerminalOutput title="log show --predicate 'subsystem == \"com.session-replay\"'" lines={logShowOutput} />
+            <TerminalOutput title={`log show --predicate 'subsystem == "com.session-replay"'`} lines={logShowOutput} />
           </div>
           <p className="mt-4 text-zinc-700 leading-relaxed">
             At <code className="text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded text-sm">14:03:42.018702</code> the SDK logged a screen-recording permission failure. From the log alone you do not know which app was frontmost, whether the user had just clicked Deny in System Settings, or whether they were even at the keyboard. The log line is the side of the conversation your code was holding. The other side, the user side, is missing.
@@ -305,7 +305,7 @@ export default function Page() {
         <section className="mt-14">
           <h2 className="text-2xl font-semibold text-zinc-900">The whole bridge is two files</h2>
           <p className="mt-3 text-zinc-700 leading-relaxed">
-            People assume bolting interaction context onto an existing log pipeline is invasive. In practice it is two small files. The logger side is one <code className="text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded text-sm">os.Logger</code> declaration so every line in your app is filterable by a single subsystem string. The capture side is a four-field struct with a <code className="text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded text-sm">captureTime</code> default of <code className="text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded text-sm">Date()</code> — the same clock <code className="text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded text-sm">log show</code> prints. That shared clock is the entire bridge.
+            People assume bolting interaction context onto an existing log pipeline is invasive. In practice it is two small files. The logger side is one <code className="text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded text-sm">os.Logger</code> declaration so every line in your app is filterable by a single subsystem string. The capture side is a four-field struct with a <code className="text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded text-sm">captureTime</code> default of <code className="text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded text-sm">Date()</code>, the same clock <code className="text-teal-700 bg-teal-50 px-1.5 py-0.5 rounded text-sm">log show</code> prints. That shared clock is the entire bridge.
           </p>
           <div className="mt-6">
             <CodeComparison
