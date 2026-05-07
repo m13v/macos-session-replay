@@ -16,8 +16,7 @@ import {
   faqPageSchema,
 } from "@seo/components";
 
-const PAGE_URL =
-  "https://macos-session-replay.com/t/iphone-tethered-qa-screen-recording";
+const PAGE_URL = "https://github.com/m13v/macos-session-replay";
 const PUBLISHED = "2026-05-07";
 const BOOKING = "https://cal.com/team/mediar/macos-session-replay";
 
@@ -51,10 +50,10 @@ const breadcrumbItems = [
 ];
 
 const breadcrumbSchemaItems = [
-  { name: "macOS Session Replay", url: "https://macos-session-replay.com/" },
+  { name: "macOS Session Replay", url: "https://github.com/m13v/macos-session-replay" },
   {
     name: "Guides",
-    url: "https://macos-session-replay.com/t/session-replay-tools",
+    url: "https://github.com/m13v/macos-session-replay",
   },
   { name: "Tethered iPhone QA screen recording", url: PAGE_URL },
 ];
@@ -204,7 +203,7 @@ const jsonLd = [
     author: "Matthew Diakonov",
     authorUrl: "https://m13v.com",
     publisherName: "macOS Session Replay",
-    publisherUrl: "https://macos-session-replay.com",
+    publisherUrl: "https://github.com/m13v/macos-session-replay",
     articleType: "TechArticle",
   }),
   breadcrumbListSchema(breadcrumbSchemaItems),

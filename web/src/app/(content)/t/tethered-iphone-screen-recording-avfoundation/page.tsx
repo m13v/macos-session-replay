@@ -448,6 +448,8 @@ export default function TetheredIphoneAvfoundationPage() {
           <CodeComparison
             leftCode={closedGateCode}
             rightCode={openGateCode}
+            leftLines={closedGateCode.split("\n").length}
+            rightLines={openGateCode.split("\n").length}
             leftLabel="Without the gate (silent zero results)"
             rightLabel="With the CoreMediaIO opt-in"
             title="DiscoverySession behavior, gate closed vs gate open"
@@ -481,7 +483,8 @@ export default function TetheredIphoneAvfoundationPage() {
           <BeforeAfter
             title="Before and after the property flip"
             before={{
-              content: flipBefore,
+              label: "Before flip",
+              content: flipBefore as unknown as string,
               highlights: [
                 "DiscoverySession returns []",
                 "no error, no notification, no log",
@@ -490,7 +493,8 @@ export default function TetheredIphoneAvfoundationPage() {
               ],
             }}
             after={{
-              content: flipAfter,
+              label: "After flip",
+              content: flipAfter as unknown as string,
               highlights: [
                 "DiscoverySession returns [iPhone] after warmup",
                 "AVCaptureDeviceWasConnected fires within seconds",
