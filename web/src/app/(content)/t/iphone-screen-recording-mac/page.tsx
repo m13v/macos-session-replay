@@ -17,8 +17,7 @@ import {
   faqPageSchema,
 } from "@seo/components";
 
-const PAGE_URL =
-  "https://github.com/m13v/macos-session-replay/iphone-screen-recording-mac";
+const PAGE_URL = "https://github.com/m13v/macos-session-replay";
 const PUBLISHED = "2026-05-08";
 const BOOKING = "https://cal.com/team/mediar/macos-session-replay";
 
